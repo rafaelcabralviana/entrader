@@ -1,0 +1,74 @@
+{# Boleta: no simulador há preset de setup; no ambiente real só tipo/lado/qtd/preço. Requer: form. Opcional: compact #}
+<div class="order-ticket-inner{% if compact %} order-ticket-inner--compact{% endif %}">
+  {% if trading_environment_is_simulator %}
+  <div class="grid2">
+    <label class="row">
+      <span>Simulação (setup)</span>
+      <select name="setup" id="boleta-setup-status">
+        <option value="open_limited" {% if form.setup == 'open_limited' %}selected{% endif %}>Em aberto (limitada, p/ cancelar)</option>
+        <option value="filled" {% if form.setup == 'filled' %}selected{% endif %}>filled — executada</option>
+        <option value="rejected" {% if form.setup == 'rejected' %}selected{% endif %}>rejected — rejeitada</option>
+      </select>
+    </label>
+    <label class="row" style="align-self:end;">
+      <span><input type="checkbox" name="no_setup" id="boleta-no-setup" {% if form.no_setup %}checked{% endif %}> Enviar sem preencher</span>
+    </label>
+  </div>
+  {% endif %}
+
+  <div class="grid2">
+    <label class="row">
+      <span>Tipo</span>
+      <select name="order_type" id="boleta-order-type">
+        <option value="market" {% if form.order_type == 'market' %}selected{% endif %}>A mercado</option>
+        <option value="limited" {% if form.order_type == 'limited' %}selected{% endif %}>Limitada</option>
+        <option value="stop-limit" {% if form.order_type == 'stop-limit' %}selected{% endif %}>Stop limit</option>
+      </select>
+    </label>
+    <label class="row">
+      <span>Ticker (ordem)</span>
+      <input type="text" name="order_ticker" value="{{ form.ticker }}" maxlength="16" autocomplete="off" id="boleta-order-ticker">
+    </label>
+  </div>
+
+  <div class="grid2">
+    <label class="row">
+      <span>Lado</span>
+      <select name="side" id="boleta-side">
+        <option value="Buy" {% if form.side == 'Buy' %}selected{% endif %}>Compra</option>
+        <option value="Sell" {% if form.side == 'Sell' %}selected{% endif %}>Venda</option>
+      </select>
+    </label>
+    <label class="row">
+      <span>Quantidade</span>
+      <input type="number" name="quantity" value="{{ form.quantity }}" min="1" step="1">
+    </label>
+  </div>
+
+  <label class="row">
+    <span>Time in force</span>
+    <select name="tif">
+      <option value="Day" {% if form.tif == 'Day' %}selected{% endif %}>Day</option>
+      <option value="ImmediateOrCancel" {% if form.tif == 'ImmediateOrCancel' %}selected{% endif %}>ImmediateOrCancel</option>
+      <option value="FillOrKill" {% if form.tif == 'FillOrKill' %}selected{% endif %}>FillOrKill</option>
+    </select>
+  </label>
+
+  <div class="grid2">
+    <label class="row">
+      <span title="Em ordem limitada: preço limite. Com Auto stop em Stop limit: mostra a cotação de referência (atualiza se ‘Mercado ao vivo’ estiver ligado). O envio stop-limit usa só disparo + limite abaixo.">Preço (referência / limitada)</span>
+      <input type="text" name="price" id="boleta-price" value="{{ form.price }}" placeholder="Ex.: 150000" inputmode="decimal">
+    </label>
+  </div>
+  <p class="hint boleta-stop-legend" id="boleta-stop-legend" hidden style="margin:0 0 0.35rem;font-size:0.76rem;line-height:1.35;"></p>
+  <div class="grid2">
+    <label class="row">
+      <span title="StopTrigger: preço que aciona a ordem stop limit.">Disparo (aciona)</span>
+      <input type="text" name="stop_trigger" id="boleta-stop-trigger" value="{{ form.stop_trigger }}" inputmode="decimal" title="StopTriggerPrice">
+    </label>
+    <label class="row">
+      <span title="StopOrder: preço limite do negócio depois que o disparo for atingido.">Limite após disparo</span>
+      <input type="text" name="stop_order" id="boleta-stop-order" value="{{ form.stop_order }}" inputmode="decimal" title="StopOrderPrice">
+    </label>
+  </div>
+</div>

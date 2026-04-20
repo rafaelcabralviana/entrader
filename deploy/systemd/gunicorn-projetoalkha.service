@@ -1,0 +1,18 @@
+[Unit]
+Description=Gunicorn — ProjetoAlkha (Django em 127.0.0.1:8000)
+After=network.target
+
+[Service]
+User=root
+Group=root
+WorkingDirectory=/home/ProjetoAlkha/core
+Environment="PATH=/home/ProjetoAlkha/venv/bin"
+ExecStart=/home/ProjetoAlkha/venv/bin/gunicorn \
+    --config /home/ProjetoAlkha/gunicorn_config.py \
+    core.wsgi:application
+
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,57 @@
+{% load site_extras %}
+{% with d=api_custody_display %}
+{% if d.error %}
+  <p class="api-data-card__err">{{ d.error }}</p>
+{% elif d.pending %}
+  <p class="api-data-card__empty" aria-busy="true">Carregando…</p>
+{% elif d.empty %}
+  <p class="api-data-card__empty">Nenhum registro.</p>
+{% elif d.keys %}
+  <div class="api-data-card__scroll">
+    <table class="api-data-table">
+      <thead>
+        <tr>
+          {% if d.key_labels %}
+            {% for label in d.key_labels %}<th scope="col">{{ label }}</th>{% endfor %}
+          {% else %}
+            {% for k in d.keys %}<th scope="col">{{ k }}</th>{% endfor %}
+          {% endif %}
+          {% if d.liquidation_actions %}<th scope="col">Ações</th>{% endif %}
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in d.rows %}
+        <tr>
+          {% for cell in row %}
+          <td
+            {% if d.pnl_column_index == forloop.counter0 %}
+            class="custody-pnl custody-pnl--{{ d.row_pnl_classes|index_at:forloop.parentloop.counter0 }}"
+            {% endif %}
+          >{{ cell }}</td>
+          {% endfor %}
+          {% if d.liquidation_actions %}
+          {% with act=d.liquidation_actions|index_at:forloop.counter0 %}
+          <td>
+            {% if act.enabled == '1' %}
+            <form method="post" action="{% url 'trader:liquidate_single_asset' %}">
+              {% csrf_token %}
+              <input type="hidden" name="next" value="{{ request.get_full_path }}">
+              <input type="hidden" name="ticker" value="{{ act.ticker }}">
+              <input type="hidden" name="quantity" value="{{ act.quantity }}">
+              <button type="submit" class="btn-cancel-order">Liquidar ativo</button>
+            </form>
+            {% else %}
+            <span class="hint">—</span>
+            {% endif %}
+          </td>
+          {% endwith %}
+          {% endif %}
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+{% elif d.pre %}
+  <pre class="api-data-pre">{{ d.pre }}</pre>
+{% endif %}
+{% endwith %}

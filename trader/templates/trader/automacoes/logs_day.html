@@ -1,0 +1,183 @@
+{% extends "trader/base.html" %}
+{% block title %}{{ page_title }}{% endblock %}
+{% block extra_css %}
+<style>
+  .logs-day-hero { margin-bottom: 1rem; }
+  .logs-day-hero h1 {
+    margin: 0 0 0.35rem;
+    font-size: 1.25rem;
+    font-weight: 800;
+    letter-spacing: -0.02em;
+  }
+  .logs-day-hero .sub {
+    margin: 0;
+    font-size: 0.86rem;
+    color: var(--muted);
+    line-height: 1.45;
+  }
+  .logs-day-toolbar {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.65rem 1rem;
+    align-items: flex-end;
+    margin-bottom: 1rem;
+    padding: 0.75rem 0.85rem;
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    background: var(--nav-bg);
+    box-shadow: var(--shadow);
+  }
+  .logs-day-toolbar label { display: grid; gap: 0.2rem; font-size: 0.82rem; }
+  .logs-day-toolbar input[type="date"],
+  .logs-day-toolbar select {
+    padding: 0.38rem 0.45rem;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    background: var(--bg);
+    color: var(--fg);
+    font-family: inherit;
+  }
+  .logs-day-nav {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem;
+    align-items: center;
+    margin-bottom: 0.75rem;
+    font-size: 0.82rem;
+  }
+  .logs-day-nav a { color: var(--nav-active); font-weight: 600; text-decoration: none; }
+  .logs-day-nav a:hover { text-decoration: underline; }
+  .logs-day-nav .disabled { color: var(--muted); pointer-events: none; }
+  .logs-day-meta { font-size: 0.82rem; color: var(--muted); margin-bottom: 0.65rem; }
+  .logs-day-table-wrap {
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    overflow: auto;
+    max-height: min(70vh, 720px);
+    background: var(--nav-bg);
+  }
+  table.logs-day-table { width: 100%; border-collapse: collapse; font-size: 0.82rem; }
+  table.logs-day-table th,
+  table.logs-day-table td {
+    padding: 0.4rem 0.55rem;
+    text-align: left;
+    border-bottom: 1px solid var(--border);
+    vertical-align: top;
+  }
+  table.logs-day-table th {
+    font-weight: 700;
+    background: var(--bg);
+    position: sticky;
+    top: 0;
+    z-index: 1;
+  }
+  table.logs-day-table .col-time {
+    white-space: nowrap;
+    font-variant-numeric: tabular-nums;
+    color: var(--muted);
+    width: 1%;
+  }
+  table.logs-day-table .col-src {
+    font-size: 0.72rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    max-width: 9rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  table.logs-day-table tr.log-row--warn .col-msg { color: #c2410c; }
+  @media (prefers-color-scheme: dark) {
+    table.logs-day-table tr.log-row--warn .col-msg { color: #fb923c; }
+  }
+  table.logs-day-table .col-msg { word-break: break-word; }
+  .logs-day-pager {
+    margin-top: 0.85rem;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem 1rem;
+    font-size: 0.84rem;
+  }
+  .logs-day-pager a { color: var(--nav-active); font-weight: 600; text-decoration: none; }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="logs-day-hero">
+  <h1>Logs por dia</h1>
+  <p class="sub">Dia civil em <strong>America/São_Paulo</strong>. Registros separados por ambiente (simulador / real). <a href="{% url 'trader:automations_dashboard' %}">Voltar às Automações</a></p>
+</div>
+
+<form class="logs-day-toolbar" method="get" action="{% url 'trader:automations_logs_day' %}">
+  <label>Data
+    <input type="date" name="day" value="{{ logs_day_iso }}" max="{{ today_iso }}" required>
+  </label>
+  <label>Ambiente
+    <select name="env" aria-label="Ambiente dos logs">
+      <option value="simulator" {% if logs_filter_env == 'simulator' %}selected{% endif %}>Simulador</option>
+      <option value="real" {% if logs_filter_env == 'real' %}selected{% endif %}>Real</option>
+    </select>
+  </label>
+  <button type="submit" class="submit">Aplicar</button>
+</form>
+<form method="post" action="{% url 'trader:automation_clear_thoughts' %}" style="margin:0 0 0.85rem;">
+  {% csrf_token %}
+  <input type="hidden" name="env" value="{{ logs_filter_env }}">
+  <input type="hidden" name="next" value="{{ request.get_full_path }}">
+  <button type="submit" class="btn-secondary" onclick="return confirm('Limpar todos os logs deste ambiente?{% if logs_filter_env == 'simulator' %} No simulador, o histórico P/L fictício (replay) e posições associadas também serão apagados.{% endif %}');">Limpar logs deste ambiente</button>
+</form>
+
+<div class="logs-day-nav" aria-label="Navegação por dia">
+  <a href="{% url 'trader:automations_logs_day' %}?day={{ prev_day_iso }}&env={{ logs_filter_env }}">Dia anterior</a>
+  <span aria-hidden="true"> · </span>
+  <a href="{% url 'trader:automations_logs_day' %}?day={{ today_iso }}&env={{ logs_filter_env }}">Hoje</a>
+  <span aria-hidden="true"> · </span>
+  {% if next_day_disabled %}
+  <span class="disabled">Próximo dia</span>
+  {% else %}
+  <a href="{% url 'trader:automations_logs_day' %}?day={{ next_day_iso }}&env={{ logs_filter_env }}">Próximo dia</a>
+  {% endif %}
+</div>
+
+<p class="logs-day-meta">
+  <strong>{{ logs_day|date:"d/m/Y" }}</strong> · {{ logs_filter_env_label }} · {{ logs_total }} linha{{ logs_total|pluralize:"s" }}
+  {% if page_obj.paginator.num_pages > 1 %} · pág. {{ page_obj.number }} / {{ page_obj.paginator.num_pages }}{% endif %}
+</p>
+
+{% if log_rows %}
+<div class="logs-day-table-wrap">
+  <table class="logs-day-table">
+    <thead>
+      <tr>
+        <th class="col-time">Data/hora (BRT)</th>
+        <th class="col-src">Origem</th>
+        <th>Tipo</th>
+        <th>Mensagem</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for row in log_rows %}
+      <tr class="log-row log-row--{{ row.kind }}">
+        <td class="col-time">{{ row.label_datetime }}</td>
+        <td class="col-src" title="{{ row.source }}">{% if row.source %}{{ row.source }}{% else %}—{% endif %}</td>
+        <td>{{ row.kind }}</td>
+        <td class="col-msg">{{ row.message }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% else %}
+<p class="hint" style="margin:0;">Nenhum log neste dia para este ambiente.</p>
+{% endif %}
+
+{% if page_obj.has_other_pages %}
+<nav class="logs-day-pager" aria-label="Paginação">
+  {% if page_obj.has_previous %}
+  <a href="{% url 'trader:automations_logs_day' %}?day={{ logs_day_iso }}&env={{ logs_filter_env }}&page={{ page_obj.previous_page_number }}">Página anterior</a>
+  {% endif %}
+  {% if page_obj.has_next %}
+  <a href="{% url 'trader:automations_logs_day' %}?day={{ logs_day_iso }}&env={{ logs_filter_env }}&page={{ page_obj.next_page_number }}">Próxima página</a>
+  {% endif %}
+</nav>
+{% endif %}
+{% endblock %}

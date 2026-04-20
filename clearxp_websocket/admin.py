@@ -1,0 +1,1 @@
+# Registrar modelos quando existirem.

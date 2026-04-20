@@ -1,0 +1,67 @@
+{% if orders_error %}
+  <p class="err">{{ orders_error }}</p>
+{% endif %}
+
+{% if order_column_keys and orders_table_display %}
+{% if orders_floating_show %}
+<style>.replay-pnl-pos{color:#34d399}.replay-pnl-neg{color:#f87171}</style>
+{% endif %}
+<section class="panel">
+  <div class="orders-table-wrap">
+  <table class="data">
+    <thead>
+      <tr>
+        {% for label in order_column_labels %}<th scope="col">{{ label }}</th>{% endfor %}
+        <th scope="col">Ações</th>
+      </tr>
+    </thead>
+    {% if orders_floating_show %}
+    <tfoot>
+      <tr>
+        <td colspan="{{ order_column_labels|length|add:1 }}" style="font-size:0.82rem;border-top:1px solid var(--border);">
+          <strong>Total desvio limite vs. mercado ({{ orders_floating_count }} ordem(ns)):</strong>
+          <span class="{{ orders_floating_pnl_class }}">{{ orders_floating_total_str }}</span>
+          <span class="hint" title="Compra: (último − limite)×qtd ; Venda: (limite − último)×qtd em ordens ainda activas com preço limite."> ℹ️</span>
+        </td>
+      </tr>
+    </tfoot>
+    {% endif %}
+    <tbody>
+      {% for row, cancel_id, can_cancel in orders_table_display %}
+      <tr class="{% if last_sent_order_id and cancel_id and cancel_id == last_sent_order_id %}order-row-latest{% endif %}">
+        {% for cell in row %}<td>{{ cell }}</td>{% endfor %}
+        <td>
+          {% if last_sent_order_id and cancel_id and cancel_id == last_sent_order_id %}
+          <span class="order-latest-badge">Último envio</span>
+          {% endif %}
+          {% if cancel_id and can_cancel %}
+          <form method="post" action="{% url 'trader:cancel_order' %}" class="form-cancel-order" style="display:inline;">
+            {% csrf_token %}
+            <input type="hidden" name="order_id" value="{{ cancel_id }}">
+            <input type="hidden" name="next" value="{{ request.get_full_path }}#ordens">
+            {% if dashboard_home %}<input type="hidden" name="dashboard_home" value="1">{% endif %}
+            <button type="submit" class="btn-cancel-order">Cancelar</button>
+          </form>
+          {% elif cancel_id %}
+          <span class="hint" title="Ordem não pode ser cancelada neste estado">—</span>
+          {% else %}
+          <span class="hint">—</span>
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  {% if dashboard_home %}
+  <p class="hint" style="margin:0.6rem 0 0;font-size:0.82rem;">Até 5 ordens mais recentes (ordenadas por data/hora).</p>
+  {% endif %}
+  <p class="hint" style="margin:0.75rem 0 0;font-size:0.82rem;">Cancelamento pela API (limite 10 requisições / 5 s).</p>
+</section>
+{% elif orders_raw_json %}
+<section class="panel">
+  <pre class="raw">{{ orders_raw_json }}</pre>
+</section>
+{% elif not orders_error %}
+<p class="hint">Nenhum dado retornado.</p>
+{% endif %}

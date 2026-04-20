@@ -1,0 +1,74 @@
+{% with sa=simulator_custody_activity %}
+{% if sa %}
+<div class="custody-sim-split" aria-label="Marcações por origem">
+  <div class="custody-sim-split__grid">
+    <div class="custody-sim-split__col">
+      <h4 class="custody-sim-split__title">Replay (robôs)</h4>
+      {% if sa.replay_empty %}
+        <p class="api-data-card__empty">Nenhuma marcação de replay.</p>
+      {% else %}
+        <div class="api-data-card__scroll">
+          <table class="api-data-table api-data-table--compact">
+            <thead>
+              <tr>
+                <th>Quando</th>
+                <th>Ativo</th>
+                <th>Lado</th>
+                <th>Qtd</th>
+                <th>Preço ref.</th>
+                <th title="Qual parte do ENTRADE registrou esta linha (não é a corretora)">Registo</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for r in sa.replay_rows %}
+              <tr>
+                <td>{{ r.at }}</td>
+                <td>{{ r.ticker }}</td>
+                <td>{{ r.side }}</td>
+                <td>{{ r.qty }}</td>
+                <td>{{ r.price }}</td>
+                <td title="{{ r.registo_title|default:''|escape }}">{{ r.registo }}</td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      {% endif %}
+    </div>
+    <div class="custody-sim-split__col">
+      <h4 class="custody-sim-split__title">Boleta, liquidação e ao vivo</h4>
+      {% if sa.live_empty %}
+        <p class="api-data-card__empty">Nenhuma marcação de uso direto da API.</p>
+      {% else %}
+        <div class="api-data-card__scroll">
+          <table class="api-data-table api-data-table--compact">
+            <thead>
+              <tr>
+                <th>Quando</th>
+                <th>Ativo</th>
+                <th>Lado</th>
+                <th>Qtd</th>
+                <th>Preço ref.</th>
+                <th title="Qual parte do ENTRADE registrou esta linha (não é a corretora)">Registo</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for r in sa.live_rows %}
+              <tr>
+                <td>{{ r.at }}</td>
+                <td>{{ r.ticker }}</td>
+                <td>{{ r.side }}</td>
+                <td>{{ r.qty }}</td>
+                <td>{{ r.price }}</td>
+                <td title="{{ r.registo_title|default:''|escape }}">{{ r.registo }}</td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      {% endif %}
+    </div>
+  </div>
+</div>
+{% endif %}
+{% endwith %}

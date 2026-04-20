@@ -1,0 +1,305 @@
+{# Requer: default_ticker_js (string). Atualização ~2s via /mercado/snapshot.json (poll_ms do JSON). #}
+<script>
+(function() {
+  var SNAPSHOT_URL = "{% url 'trader:market_snapshot_json' %}";
+  var DEFAULT_TICKER = "{{ default_ticker_js|escapejs }}";
+  /* Predefinição mais suave: várias abas + candles + strip financeiro somam carga de CPU/rede. */
+  var pollMs = 2200;
+  var timer = null;
+  var pollPaused = false;
+
+  function esc(s) {
+    if (s == null || s === '') return '';
+    return String(s)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
+  }
+
+  function currentTicker() {
+    var inp = document.querySelector('.mp-form input[name="ticker"]');
+    var v = inp && inp.value ? inp.value.trim().toUpperCase() : '';
+    if (v) return v;
+    var q = new URLSearchParams(window.location.search).get('ticker');
+    return (q || DEFAULT_TICKER || '').trim().toUpperCase();
+  }
+
+  function bookSides(b) {
+    if (!b || typeof b !== 'object') return { bids: [], asks: [] };
+    return {
+      bids: b.bids || b.Bids || [],
+      asks: b.asks || b.Asks || []
+    };
+  }
+
+  function bookField(entry, key) {
+    if (!entry || typeof entry !== 'object') return '—';
+    if (entry[key] !== undefined && entry[key] !== null && entry[key] !== '') return entry[key];
+    var alt = key.charAt(0).toUpperCase() + key.slice(1);
+    if (entry[alt] !== undefined && entry[alt] !== null && entry[alt] !== '') return entry[alt];
+    return '—';
+  }
+
+  function dlDetails(d) {
+    if (!d) return '';
+    var h = '';
+    var keys = [
+      ['ticker', 'Ticker'], ['asset', 'Ativo'], ['type', 'Tipo'], ['currency', 'Moeda'],
+      ['minOrderQty', 'Qtd. mín.'], ['maxOrderQty', 'Qtd. máx.'],
+      ['contractMultiplier', 'Multiplicador'], ['priceDivisor', 'Divisor preço']
+    ];
+    for (var i = 0; i < keys.length; i++) {
+      var k = keys[i][0];
+      if (d[k] !== undefined && d[k] !== null && d[k] !== '') {
+        h += '<dt>' + esc(keys[i][1]) + '</dt><dd>' + esc(d[k]) + '</dd>';
+      }
+    }
+    return h ? '<dl class="grid-dl">' + h + '</dl>' : '';
+  }
+
+  function dlQuote(q) {
+    if (!q) return '';
+    function fmtBrt(v) {
+      if (v == null || v === '') return v;
+      var d = new Date(v);
+      if (isNaN(d.getTime())) return v;
+      return new Intl.DateTimeFormat('pt-BR', {
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+        hour12: false,
+        timeZone: 'America/Sao_Paulo'
+      }).format(d);
+    }
+    var rows = [];
+    if (q.ticker !== undefined) rows.push(['Ticker', q.ticker]);
+    if (q.lastPrice !== undefined) rows.push(['Último', q.lastPrice]);
+    if (q.lastQuantity !== undefined) rows.push(['Último vol.', q.lastQuantity]);
+    if (q.status) rows.push(['Status', q.status]);
+    if (q.tradeDateTime) rows.push(['Negócio', fmtBrt(q.tradeDateTime)]);
+    if (q.open !== undefined) rows.push(['Abertura', q.open]);
+    if (q.high !== undefined) rows.push(['Máxima', q.high]);
+    if (q.low !== undefined) rows.push(['Mínima', q.low]);
+    if (q.close !== undefined) rows.push(['Fechamento', q.close]);
+    if (q.dateTime) rows.push(['Timestamp', fmtBrt(q.dateTime)]);
+    var h = '';
+    for (var j = 0; j < rows.length; j++) {
+      h += '<dt>' + esc(rows[j][0]) + '</dt><dd>' + esc(rows[j][1]) + '</dd>';
+    }
+    return h ? '<dl class="grid-dl">' + h + '</dl>' : '';
+  }
+
+  function buildHtml(d) {
+    var err = d.errors || {};
+    var hints = d.operation_hints || {};
+    var lim = '<section class="panel mp-limits"><h2>Limites de operação (referência doc)</h2><dl class="grid-dl">' +
+      '<dt>Mercado</dt><dd>' + esc(hints.mercado) + '</dd>' +
+      '<dt>Base BMF</dt><dd>' + esc(hints.base_bmf) + '</dd>' +
+      '<dt>Máx. ordens / dia (envio)</dt><dd>' + esc(hints.limite_ordens_dia) + '</dd>' +
+      '<dt>Máx. por ordem (boleta)</dt><dd>' + esc(hints.limite_boleta) + '</dd></dl>' +
+      '<p class="hint" style="margin-bottom:0;">Cancelamento não consome limite diário; replace valida só boleta.</p></section>';
+
+    var detBody = err.details ? '<p class="err">' + esc(err.details) + '</p>' : (dlDetails(d.details) || (!err.details ? '<p class="hint">Sem dados.</p>' : ''));
+    var det = '<section class="panel"><h2>Detalhes (TickerDetails)</h2>' + detBody + '</section>';
+
+    var quoBody = err.quote ? '<p class="err">' + esc(err.quote) + '</p>' : (dlQuote(d.quote) || (!err.quote ? '<p class="hint">Sem dados.</p>' : ''));
+    var quo = '<section class="panel"><h2>Cotação (Quote)</h2>' + quoBody + '</section>';
+
+    var top = '<div class="mp-cards-top">' + lim + det + quo + '</div>';
+
+    var bs = bookSides(d.book);
+    var bookInner = '';
+    if (err.book) bookInner = '<p class="err">' + esc(err.book) + '</p>';
+    else if (d.book) {
+      var bids = bs.bids || [];
+      var asks = bs.asks || [];
+      var n = Math.min(Math.max(bids.length, asks.length), 10);
+      if (!bids.length && !asks.length) {
+        bookInner += '<p class="hint">Livro vazio ou formato inesperado.</p>';
+      } else {
+        var rows = '';
+        for (var i = 0; i < n; i++) {
+          var bid = bids[i] || {};
+          var ask = asks[i] || {};
+          var bidPos = bookField(bid, 'position');
+          var bidPrice = bookField(bid, 'price');
+          var bidQty = bookField(bid, 'quantity');
+          var askQty = bookField(ask, 'quantity');
+          var askPrice = bookField(ask, 'price');
+          var askPos = bookField(ask, 'position');
+          rows +=
+            '<tr>' +
+            '<td>' + esc(bidPos) + '</td>' +
+            '<td class="price"><span class="book-bid-price">' + esc(bidPrice) + '</span></td>' +
+            '<td class="qty">' + esc(bidQty) + '</td>' +
+            '<td class="qty">' + esc(askQty) + '</td>' +
+            '<td class="price"><span class="book-ask-price">' + esc(askPrice) + '</span></td>' +
+            '<td>' + esc(askPos) + '</td>' +
+            '</tr>';
+        }
+        bookInner +=
+          '<table class="book-compact">' +
+          '<thead><tr>' +
+          '<th>Pos. C</th><th>Preço C</th><th>Qtd. C</th><th>Qtd. V</th><th>Preço V</th><th>Pos. V</th>' +
+          '</tr></thead>' +
+          '<tbody>' + rows + '</tbody>' +
+          '</table>';
+      }
+    } else if (!err.book) bookInner = '<p class="hint">Sem dados.</p>';
+
+    var bookSec = '<section class="panel" style="margin-top:0;"><h2>Livro de ofertas (Book)</h2>' + bookInner + '</section>';
+
+    var ab = d.agg_bids || [];
+    var aa = d.agg_asks || [];
+    var aggInner = '';
+    if (err.aggregate_book) aggInner = '<p class="err">' + esc(err.aggregate_book) + '</p>';
+    else if (d.aggregate_book || ab.length || aa.length) {
+      var n2 = Math.min(Math.max(ab.length, aa.length), 10);
+      if (!ab.length && !aa.length) {
+        aggInner += '<p class="hint">Livro agregado vazio ou chaves diferentes do esperado (bids/asks).</p>';
+      } else {
+        var rows2 = '';
+        for (var j = 0; j < n2; j++) {
+          var bid2 = ab[j] || {};
+          var ask2 = aa[j] || {};
+          var bidPos2 = bookField(bid2, 'position');
+          var bidPrice2 = bookField(bid2, 'price');
+          var bidQty2 = bookField(bid2, 'quantity');
+          var askQty2 = bookField(ask2, 'quantity');
+          var askPrice2 = bookField(ask2, 'price');
+          var askPos2 = bookField(ask2, 'position');
+          rows2 +=
+            '<tr>' +
+            '<td>' + esc(bidPos2) + '</td>' +
+            '<td class="price"><span class="book-bid-price">' + esc(bidPrice2) + '</span></td>' +
+            '<td class="qty">' + esc(bidQty2) + '</td>' +
+            '<td class="qty">' + esc(askQty2) + '</td>' +
+            '<td class="price"><span class="book-ask-price">' + esc(askPrice2) + '</span></td>' +
+            '<td>' + esc(askPos2) + '</td>' +
+            '</tr>';
+        }
+        aggInner +=
+          '<table class="book-compact">' +
+          '<thead><tr>' +
+          '<th>Pos. C</th><th>Preço C</th><th>Qtd. C</th><th>Qtd. V</th><th>Preço V</th><th>Pos. V</th>' +
+          '</tr></thead>' +
+          '<tbody>' + rows2 + '</tbody>' +
+          '</table>';
+      }
+    } else if (!err.aggregate_book) aggInner = '<p class="hint">Sem dados.</p>';
+
+    var aggSec = '<section class="panel" style="margin-top:0;"><h2>Livro agregado (Aggregate Book)</h2><p class="hint">Por preço (doc). Limite: 1 req/s.</p>' + aggInner + '</section>';
+
+    var lower = '<div class="mp-lower mp-lower--books-only">' + bookSec + aggSec + '</div>';
+
+    return top + lower;
+  }
+
+  function applySnapshot(d) {
+    if (typeof d.poll_ms === 'number' && d.poll_ms >= 900) {
+      pollMs = Math.min(8000, Math.max(900, d.poll_ms));
+    }
+    var z = document.getElementById('market-live-zone');
+    if (!z) return;
+    z.innerHTML = buildHtml(d);
+  }
+
+  function ensurePauseBanner(msg) {
+    var z = document.getElementById('market-live-zone');
+    if (!z || !z.parentNode) return;
+    var id = 'market-live-pause-banner';
+    var el = document.getElementById(id);
+    if (!el) {
+      el = document.createElement('p');
+      el.id = id;
+      el.className = 'hint';
+      el.style.margin = '0 0 0.65rem';
+      z.parentNode.insertBefore(el, z);
+    }
+    el.textContent = msg;
+  }
+
+  function pausePolling(msg) {
+    if (pollPaused) return;
+    pollPaused = true;
+    if (timer) {
+      clearTimeout(timer);
+      timer = null;
+    }
+    ensurePauseBanner(msg);
+  }
+
+  function tick() {
+    if (document.hidden || pollPaused) return Promise.resolve();
+    var t = currentTicker();
+    var url = SNAPSHOT_URL + '?ticker=' + encodeURIComponent(t || DEFAULT_TICKER);
+    return fetch(url, { credentials: 'same-origin', headers: { 'Accept': 'application/json' } })
+      .then(function(r) {
+        if (r.status === 401 || r.status === 403) return null;
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        return r.json();
+      })
+      .then(function(d) {
+        if (!d) return;
+        applySnapshot(d);
+        if (d.live_poll_active === false) {
+          if (d.pause_reason === 'status_404') {
+            pausePolling('Ticker com status 404 na API — atualização automática pausada. Ajuste o ticker e consulte novamente.');
+          } else {
+            pausePolling('Status endofday — atualização automática pausada. Recarregue a página ou consulte outro ticker no próximo pregão.');
+          }
+        }
+      })
+      .catch(function() { /* silencioso */ });
+  }
+
+  /** Um pedido de cada vez; o intervalo efectivo vem de ``pollMs`` actualizado pelo snapshot. */
+  function scheduleNextMarketPoll() {
+    if (pollPaused) return;
+    if (!document.getElementById('market-live-zone')) return;
+    if (timer) clearTimeout(timer);
+    var delay = Math.min(8000, Math.max(900, pollMs));
+    timer = setTimeout(function() {
+      timer = null;
+      tick()
+        .catch(function() {})
+        .finally(function() {
+          if (!pollPaused && !document.hidden) scheduleNextMarketPoll();
+        });
+    }, delay);
+  }
+
+  function start() {
+    if (!document.getElementById('market-live-zone')) return;
+    tick()
+      .catch(function() {})
+      .finally(function() {
+        if (!pollPaused) scheduleNextMarketPoll();
+      });
+    document.addEventListener('visibilitychange', function() {
+      if (document.hidden) {
+        if (timer) {
+          clearTimeout(timer);
+          timer = null;
+        }
+      } else if (!pollPaused) {
+        tick()
+          .catch(function() {})
+          .finally(function() {
+            scheduleNextMarketPoll();
+          });
+      }
+    });
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', start);
+  } else {
+    start();
+  }
+})();
+</script>

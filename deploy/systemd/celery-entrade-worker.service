@@ -1,0 +1,20 @@
+[Unit]
+Description=Celery worker — ENTRADE (tarefas assíncronas, ex. cotações para gráficos)
+After=network.target
+# Broker: Redis (ex.: apt install redis-server). Inicie o Redis antes deste serviço.
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/home/APICLEAR/ENTRADE
+Environment="PATH=/home/APICLEAR/ENTRADE/.venv/bin:/usr/local/bin:/usr/bin"
+Environment="DJANGO_SETTINGS_MODULE=ENTRADE.settings"
+# Opcional: TRADER_WATCH_INTERVAL_SEC=10 (Beat + coleta; default 6s no settings).
+# Opcional: CELERY_BROKER_URL=redis://127.0.0.1:6379/0 — lock da coleta usa o mesmo Redis entre workers.
+ExecStart=/home/APICLEAR/ENTRADE/.venv/bin/celery -A ENTRADE worker --loglevel=INFO --concurrency=2
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

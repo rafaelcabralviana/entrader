@@ -1,0 +1,1996 @@
+{% if automation_market_sim and automation_market_sim.effective %}
+<script>
+window.__ENTRADE_AUTOMATION_SIM__ = {
+  session_date_iso: "{{ automation_market_sim.session_date_iso|escapejs }}",
+  sim_ticker: "{{ automation_market_sim.sim_ticker|escapejs }}"
+};
+</script>
+{% endif %}
+<script>
+(function() {
+  var endpoint = "{% url 'trader:quote_candles_json' %}";
+  var sessionDatesEndpoint = "{% url 'trader:quote_candles_session_dates_json' %}";
+  var tickerInput = document.getElementById('candles-ticker');
+  var intervalSelect = document.getElementById('candles-interval');
+  var chartTypeSelect = document.getElementById('candles-type');
+  var vpEnabledInput = document.getElementById('candles-vp-enabled');
+  var vpLabelsInput = document.getElementById('candles-vp-labels');
+  var vpHistoricalInput = document.getElementById('candles-vp-historical');
+  var vpBinsSelect = document.getElementById('candles-vp-bins');
+  var scrollInput = document.getElementById('candles-scroll');
+  var scrollMeta = document.getElementById('candles-scroll-meta');
+  var quoteCompact = document.getElementById('candles-quote-compact');
+  var refreshBtn = document.getElementById('candles-refresh');
+  var sessionDateSelect = document.getElementById('candles-session-date');
+  var svg = document.getElementById('candles-svg');
+  var volSvg = document.getElementById('candles-volume-svg');
+  var meta = document.getElementById('candles-meta');
+  var loadingOverlay = document.getElementById('candles-loading');
+  if (!tickerInput || !intervalSelect || !refreshBtn || !svg || !volSvg || !meta) return;
+
+  (function syncTickerFromAutomationSim() {
+    try {
+      var cfg = window.__ENTRADE_AUTOMATION_SIM__;
+      if (cfg && cfg.sim_ticker && tickerInput) {
+        tickerInput.value = String(cfg.sim_ticker).trim().toUpperCase();
+      }
+    } catch (eA) {}
+  })();
+
+  function setChartsLoading(on) {
+    if (!loadingOverlay) return;
+    loadingOverlay.hidden = !on;
+    loadingOverlay.setAttribute('aria-busy', on ? 'true' : 'false');
+  }
+
+  var lastCandles = null;
+  var lastStatusChanges = [];
+  var allTradeMarkers = [];
+  var allStrategyMarkers = [];
+  /** Estado de bracket no cache (TP / SL com trailing) — mesmo ticker do gráfico. */
+  var allBracketLive = null;
+  /** Histórico local de preços TP/SL/entrada para mostrar «rastro» do trailing (modo foco). */
+  var trailPriceHistory = [];
+  var trailHistLaneKey = '';
+  // Evitar empilhar com mercado + strip + log de automações (mesma página).
+  var POLL_MS = 2400;
+  var pollTimer = null;
+  /** True quando a API indica fim de pregão (live_poll_active) e o intervalo de poll foi parado. */
+  var candlesPollPaused = false;
+  try {
+    window.__ENTRADE_LIVE_CHART_POLL_PAUSED__ = false;
+  } catch (ePollG) {}
+  var inflight = false;
+  var candlesReqSeq = 0;
+  var candlesAbort = null;
+  var resizeTimer = null;
+  var FETCH_LIMIT = 5000;
+  /** Replay/simulação: 1º GET só uma fatia do dia; o restante vem em sequência (ver ``loadProgressiveDay``). */
+  var PROGRESSIVE_FETCH_LIMIT = 1000;
+  var PROGRESSIVE_CHUNK_HOURS = 2;
+  /** Só busca o próximo trecho quando a janela está perto do fim do que já veio do servidor (evita encher a RAM e travar o browser). */
+  var PROGRESSIVE_EDGE_CANDLES = 48;
+  var VP_HISTORICAL_MAX_CANDLES = 2000;
+  var VIEW_WINDOW = 120;
+  var allCandles = null;
+  var allStatusChanges = [];
+  var windowStart = 0;
+  var lastData = null;
+  var followLiveRightEdge = true;
+  var yPanFrac = 0; // deslocamento vertical do viewport de preço (arraste do mouse)
+  var dragYActive = false;
+  var dragYStartClient = 0;
+  var dragYStartPan = 0;
+  var dragXActive = false;
+  var dragXStartClient = 0;
+  var dragXStartWindow = 0;
+  /** Carregamento progressivo: ainda há trechos no servidor; próximo índice; sequência da carga atual. */
+  var progressiveMorePending = false;
+  var progressiveNextChunkIndex = 1;
+  var progressiveNextSegmentIndex = 0;
+  /** Encadeamento automático 1000-em-1000 até o fim do dia (evita GET único com 50k+ linhas). */
+  var progressiveChainActive = false;
+  var progressiveLoadSeq = 0;
+  var progressiveTailInflight = false;
+  var progressiveTailScheduled = false;
+  var progressiveTailTimer = null;
+  var PROGRESSIVE_TAIL_DEBOUNCE_MS = 0;
+
+  function isReplayCandles() {
+    try {
+      return !!(typeof window !== 'undefined' && window.__ENTRADE_REPLAY_MODE__);
+    } catch (eR) {
+      return false;
+    }
+  }
+
+  /** True = opção «Últimos dados (ao vivo)» (valor do select vazio). */
+  function isLiveSessionDropdown() {
+    return !!(sessionDateSelect && !String(sessionDateSelect.value || '').trim());
+  }
+
+  /**
+   * Polling do JSON de candles: ativo no ao vivo e em **dia fixo** (intervalo maior),
+   * para novos QuoteSnapshot aparecerem sem depender só do botão Ver. Desligado no replay.
+   */
+  function shouldPollCandlesChart() {
+    if (isReplayCandles()) return false;
+    return !!sessionDateSelect;
+  }
+
+  function candlesPollIntervalMs() {
+    return isLiveSessionDropdown() ? POLL_MS : 8000;
+  }
+
+  /** Compat: nome antigo; hoje cobre ao vivo + dia histórico (exceto replay). */
+  function shouldPollCandles() {
+    return shouldPollCandlesChart();
+  }
+
+  function replayCandlesQuery() {
+    try {
+      if (!window.__ENTRADE_REPLAY_MODE__) return '';
+      var u = window.__ENTRADE_REPLAY_UNTIL__;
+      if (u == null || String(u).trim() === '') return '';
+      return '&replay_until=' + encodeURIComponent(String(u).trim());
+    } catch (eQ) { return ''; }
+  }
+
+  function sessionDateQuery() {
+    if (!sessionDateSelect || !String(sessionDateSelect.value || '').trim()) return '';
+    return '&session_date=' + encodeURIComponent(String(sessionDateSelect.value).trim());
+  }
+
+  function formatYmdBr(ymd) {
+    var p = String(ymd || '').split('-');
+    if (p.length !== 3) return String(ymd || '');
+    return p[2] + '/' + p[1] + '/' + p[0];
+  }
+
+  function ensureSessionDateOption(ymd) {
+    if (!sessionDateSelect || !ymd) return;
+    var v = String(ymd).trim().slice(0, 10);
+    if (v.length !== 10) return;
+    if (sessionDateSelect.querySelector('option[value="' + v + '"]')) return;
+    var o = document.createElement('option');
+    o.value = v;
+    o.textContent = formatYmdBr(v) + ' (simulação)';
+    sessionDateSelect.appendChild(o);
+  }
+
+  /** Com simulação de pregão ativa, força o dia da sessão no select (mesmo sem snapshots na lista da API). */
+  function applyAutomationSimBootstrap() {
+    var cfg = window.__ENTRADE_AUTOMATION_SIM__;
+    if (!cfg || !cfg.session_date_iso) return false;
+    if (cfg.sim_ticker && tickerInput) {
+      tickerInput.value = String(cfg.sim_ticker).trim().toUpperCase();
+    }
+    var ymd = String(cfg.session_date_iso).trim().slice(0, 10);
+    if (!ymd || ymd.length !== 10) return false;
+    if (!sessionDateSelect) return false;
+    /* Replay real (scrubber) liga __ENTRADE_REPLAY_MODE__ em automation_replay_script.
+       Se marcamos aqui, o poll do gráfico morre e só o scrubber atualiza — parece «só ir somando». */
+    try {
+      window.__ENTRADE_REPLAY_MODE__ = false;
+      window.__ENTRADE_REPLAY_UNTIL__ = '';
+    } catch (eSim) {}
+    ensureSessionDateOption(ymd);
+    sessionDateSelect.value = ymd;
+    followLiveRightEdge = true;
+    candlesPollPaused = false;
+    load(true);
+    restartCandlesPolling();
+    return true;
+  }
+
+  function fetchSessionDates(done) {
+    var t = (tickerInput.value || '').trim().toUpperCase();
+    if (!t) {
+      if (sessionDateSelect) {
+        sessionDateSelect.innerHTML = '';
+        var o0 = document.createElement('option');
+        o0.value = '';
+        o0.textContent = 'Últimos dados (ao vivo)';
+        sessionDateSelect.appendChild(o0);
+      }
+      if (done) done();
+      return;
+    }
+    fetch(sessionDatesEndpoint + '?ticker=' + encodeURIComponent(t), {
+      credentials: 'same-origin',
+      headers: { 'Accept': 'application/json' }
+    })
+      .then(function(r) {
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        return r.json();
+      })
+      .then(function(data) {
+        var dates = (data && data.dates) ? data.dates : [];
+        if (!sessionDateSelect) {
+          if (done) done();
+          return;
+        }
+        var prev = sessionDateSelect.value;
+        sessionDateSelect.innerHTML = '';
+        var opt0 = document.createElement('option');
+        opt0.value = '';
+        opt0.textContent = 'Últimos dados (ao vivo)';
+        sessionDateSelect.appendChild(opt0);
+        for (var i = 0; i < dates.length; i++) {
+          var ymd = String(dates[i] || '').trim().slice(0, 10);
+          if (!ymd) continue;
+          var o = document.createElement('option');
+          o.value = ymd;
+          o.textContent = formatYmdBr(ymd);
+          sessionDateSelect.appendChild(o);
+        }
+        var found = false;
+        for (var j = 0; j < sessionDateSelect.options.length; j++) {
+          if (sessionDateSelect.options[j].value === prev) {
+            found = true;
+            break;
+          }
+        }
+        sessionDateSelect.value = found ? prev : '';
+        if (done) done();
+      })
+      .catch(function() {
+        if (done) done();
+      });
+  }
+
+  function formatIsoLocal(iso, showSeconds) {
+    if (!iso) return '';
+    var d = new Date(iso);
+    if (isNaN(d.getTime())) return String(iso);
+    var opts = {
+      day: '2-digit',
+      month: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false,
+      timeZone: 'America/Sao_Paulo'
+    };
+    if (showSeconds) opts.second = '2-digit';
+    return new Intl.DateTimeFormat('pt-BR', opts).format(d);
+  }
+
+  function esc(s) {
+    return String(s == null ? '' : s)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;');
+  }
+
+  function compactItem(label, value) {
+    return '<span class="q-item"><span class="q-k">' + esc(label) + ':</span><span class="q-v">' + esc(value) + '</span></span>';
+  }
+
+  function renderCompactQuote(data, visible) {
+    if (!quoteCompact) return;
+    var d = data || {};
+    var candles = visible || [];
+    if (!candles.length) {
+      quoteCompact.textContent = 'Sem cotação.';
+      return;
+    }
+    var last = candles[candles.length - 1] || {};
+    var out = '';
+    out += compactItem('Ticker', d.ticker || '—');
+    out += compactItem('Último', last.close != null ? last.close : '—');
+    out += compactItem('Abert', last.open != null ? last.open : '—');
+    out += compactItem('Máx', last.high != null ? last.high : '—');
+    out += compactItem('Mín', last.low != null ? last.low : '—');
+    out += compactItem('Vol', last.volume != null ? Math.round(Number(last.volume) || 0) : '—');
+    out += compactItem('Status', last.status || '—');
+    quoteCompact.innerHTML = out;
+  }
+
+  function renderEmpty(msg) {
+    svg.innerHTML = '<text x="20" y="30" fill="currentColor" font-size="14">' + esc(msg) + '</text>';
+    volSvg.innerHTML = '';
+  }
+
+  function draw(candles, chartType, statusChanges, tradeMarkers, strategyMarkers, showSeconds, vpEnabled, vpBins, vpLabelsEnabled, vpHistoricalEnabled, bracketLive, panFrac) {
+    var w = Math.max(640, Math.round((svg && svg.clientWidth) || 960));
+    var h = Math.max(220, Math.round((svg && svg.clientHeight) || 280));
+    var p = 28;
+    var vw = Math.max(640, Math.round((volSvg && volSvg.clientWidth) || 960));
+    var vh = Math.max(100, Math.round((volSvg && volSvg.clientHeight) || 150));
+    var vp = 20;
+    var vpAreaW = vpEnabled ? Math.round(Math.max(92, Math.min(170, w * 0.135))) : 0;
+    var plotRight = w - p - vpAreaW;
+    if (svg) svg.setAttribute('viewBox', '0 0 ' + w + ' ' + h);
+    if (volSvg) volSvg.setAttribute('viewBox', '0 0 ' + vw + ' ' + vh);
+    if (!candles.length) {
+      renderEmpty('Sem dados suficientes para candles.');
+      return;
+    }
+    var min = Infinity, max = -Infinity, maxVol = 0;
+    for (var i = 0; i < candles.length; i++) {
+      min = Math.min(min, candles[i].low);
+      max = Math.max(max, candles[i].high);
+      maxVol = Math.max(maxVol, candles[i].volume || 0);
+    }
+    var blLanes = (bracketLive && bracketLive.lanes) ? bracketLive.lanes : [];
+    var trailingFocusMode = !!(blLanes && blLanes.length);
+    if (trailingFocusMode && blLanes.length) {
+      var primLane = blLanes[0] || {};
+      for (var plh = 0; plh < blLanes.length; plh++) {
+        var Lh = blLanes[plh] || {};
+        if (String(Lh.lane || '').indexOf('replay') < 0) {
+          primLane = Lh;
+          break;
+        }
+      }
+      var opK = String((lastData && lastData.ticker) || '') + '|' + String(primLane.lane || '') + '|' + String(primLane.operation_id || '');
+      if (trailHistLaneKey !== opK) {
+        trailHistLaneKey = opK;
+        trailPriceHistory = [];
+      }
+      var tppH = primLane.tp_price != null ? Number(primLane.tp_price) : NaN;
+      var sllH = primLane.sl_trigger != null ? Number(primLane.sl_trigger) : NaN;
+      var entH = primLane.entry_anchor != null ? Number(primLane.entry_anchor) : NaN;
+      if (isFinite(tppH) || isFinite(sllH) || isFinite(entH)) {
+        var prevH = trailPriceHistory[trailPriceHistory.length - 1];
+        var chg = !prevH || prevH.tp !== tppH || prevH.sl !== sllH || prevH.entry !== entH;
+        if (chg) {
+          trailPriceHistory.push({ tp: tppH, sl: sllH, entry: entH, ts: Date.now() });
+          if (trailPriceHistory.length > 64) trailPriceHistory = trailPriceHistory.slice(-64);
+        }
+      }
+    } else if (!trailingFocusMode) {
+      trailHistLaneKey = '';
+    }
+    for (var bi0 = 0; bi0 < blLanes.length; bi0++) {
+      var B0 = blLanes[bi0] || {};
+      if (B0.tp_price != null) {
+        var tpv0 = Number(B0.tp_price);
+        if (isFinite(tpv0)) {
+          min = Math.min(min, tpv0);
+          max = Math.max(max, tpv0);
+        }
+      }
+      if (B0.sl_trigger != null) {
+        var slv0 = Number(B0.sl_trigger);
+        if (isFinite(slv0)) {
+          min = Math.min(min, slv0);
+          max = Math.max(max, slv0);
+        }
+      }
+      if (B0.entry_anchor != null) {
+        var eav0 = Number(B0.entry_anchor);
+        if (isFinite(eav0)) {
+          min = Math.min(min, eav0);
+          max = Math.max(max, eav0);
+        }
+      }
+    }
+    if (!isFinite(min) || !isFinite(max)) {
+      renderEmpty('Sem dados suficientes para candles.');
+      return;
+    }
+    // Preço constante (ou quase): ainda assim desenha linha/candles “achatados”.
+    if (max <= min) {
+      var flat = Number(min);
+      if (!isFinite(flat)) flat = 0;
+      var pad = Math.max(0.01, Math.abs(flat) * 0.0001);
+      min = flat - pad;
+      max = flat + pad;
+    }
+    var baseSpan = max - min;
+    var panNorm = Math.max(-1, Math.min(1, Number(panFrac) || 0));
+    // Headroom mais curto para "zoom" visual e melhor preenchimento da área.
+    var panHeadroom = baseSpan * 0.12;
+    var panShift = panNorm * panHeadroom;
+    var vMin = (min - panHeadroom) + panShift;
+    var vMax = (max + panHeadroom) + panShift;
+    function yFromPrice(px) {
+      var clamped = Math.max(vMin, Math.min(vMax, Number(px)));
+      return p + (h - 2 * p) * (1 - ((clamped - vMin) / (vMax - vMin)));
+    }
+
+    function fmtPrice(v) {
+      var n = Number(v);
+      if (!isFinite(n)) return '—';
+      var abs = Math.abs(n);
+      var d = abs >= 100 ? 2 : (abs >= 10 ? 3 : (abs >= 1 ? 4 : 6));
+      var s = n.toFixed(d);
+      // Remove zeros à direita e ponto decimal vazio.
+      s = s.replace(/\.?0+$/, '');
+      return s;
+    }
+
+    /* Janela com até VIEW_WINDOW candles: largura de barra fixa (estilo terminal) e alinhamento à direita
+       quando há poucos pontos — evita «esticar» tudo na largura inteira enquanto o replay cresce. */
+    var nVis = candles.length;
+    var slotCount = Math.max(VIEW_WINDOW, nVis);
+    var step = (plotRight - p) / Math.max(1, slotCount);
+    var slotOffset = Math.max(0, slotCount - nVis);
+    function xCenterForIdx(jj) {
+      return p + ((slotOffset + jj) * step) + (step / 2);
+    }
+    var bodyW = Math.max(1.5, Math.min(8, step * 0.35));
+
+    var content = [];
+    content.push(
+      '<line x1="' + p + '" y1="' + (h - p) + '" x2="' + plotRight + '" y2="' + (h - p) + '" stroke="currentColor" stroke-opacity="0.25"/>'
+    );
+
+    // Grade + números de preço (aprox. 4 níveis; mais leve no modo foco trailing)
+    var tickCount = trailingFocusMode ? 3 : 4;
+    var hGridOp = trailingFocusMode ? '0.05' : '0.10';
+    var priceSpan = vMax - vMin;
+    for (var ti = 0; ti <= tickCount; ti++) {
+      var ratioTop = ti / tickCount; // 0 = topo (max), 1 = base (min)
+      var val = vMax - priceSpan * ratioTop;
+      var y = p + (h - 2 * p) * ratioTop;
+      content.push(
+        '<line x1="' + p.toFixed(2) + '" y1="' + y.toFixed(2) + '" x2="' + plotRight.toFixed(2) + '" y2="' + y.toFixed(2) + '" stroke="currentColor" stroke-opacity="' + hGridOp + '"/>'
+      );
+      content.push(
+        '<text x="' + (p - 20).toFixed(2) + '" y="' + (y + 4).toFixed(2) + '" font-size="11" fill="#94a3b8" text-anchor="start">' + fmtPrice(val) + '</text>'
+      );
+    }
+
+    // Grade vertical + horário no eixo X. (no modo foco: só 2 marcas — menos ruído)
+    var xTickCount = trailingFocusMode ? 2 : Math.max(2, Math.min(8, Math.floor(candles.length / 10)));
+    for (var xti = 0; xti <= xTickCount; xti++) {
+      var idxTick = Math.round((xti / xTickCount) * (candles.length - 1));
+      var ct = candles[idxTick] || {};
+      var xt = xCenterForIdx(idxTick);
+      var labelIso = ct.bucket_start || ct.label;
+      var labelTime = formatIsoLocal(labelIso, !!showSeconds);
+      if (labelTime && labelTime.indexOf(' ') >= 0) labelTime = labelTime.split(' ')[1];
+      content.push(
+        '<line x1="' + xt.toFixed(2) + '" y1="' + p.toFixed(2) + '" x2="' + xt.toFixed(2) + '" y2="' + (h - p).toFixed(2) + '" stroke="currentColor" stroke-opacity="' + (trailingFocusMode ? '0.04' : '0.08') + '"/>'
+      );
+      content.push(
+        '<text x="' + xt.toFixed(2) + '" y="' + (h - 8).toFixed(2) + '" font-size="10" fill="#94a3b8" text-anchor="middle">' + esc(labelTime) + '</text>'
+      );
+    }
+
+    var type = (chartType || 'candles').toString().toLowerCase();
+    if (type === 'line') {
+      var pts = [];
+      for (var i2 = 0; i2 < candles.length; i2++) {
+        var c2 = candles[i2];
+        var x2 = xCenterForIdx(i2);
+        var yClose2 = yFromPrice(c2.close);
+        pts.push(x2.toFixed(2) + ',' + yClose2.toFixed(2));
+      }
+      content.push('<polyline points="' + pts.join(' ') + '" fill="none" stroke="#60a5fa" stroke-width="1.6" stroke-opacity="0.95"/>');
+      // Marcador do último ponto para não poluir.
+      var last = candles[candles.length - 1];
+      var lx = xCenterForIdx(candles.length - 1);
+      var ly = yFromPrice(last.close);
+      content.push('<circle cx="' + lx.toFixed(2) + '" cy="' + ly.toFixed(2) + '" r="2.8" fill="#60a5fa" fill-opacity="0.95" stroke="#93c5fd" stroke-width="1"/>');
+    } else if (type === 'ohlc') {
+      for (var j = 0; j < candles.length; j++) {
+        var c = candles[j];
+        var x = xCenterForIdx(j);
+        var yHigh = yFromPrice(c.high);
+        var yLow = yFromPrice(c.low);
+        var yOpen = yFromPrice(c.open);
+        var yClose = yFromPrice(c.close);
+        if (Math.abs(yHigh - yLow) < 1) {
+          var mwO = (yHigh + yLow) / 2;
+          yHigh = mwO - 3.5;
+          yLow = mwO + 3.5;
+        }
+        if (Math.abs(yOpen - yClose) < 1) {
+          var mbO = (yOpen + yClose) / 2;
+          yOpen = mbO - 2.5;
+          yClose = mbO + 2.5;
+        }
+        var up = c.close >= c.open;
+        var color = up ? '#16a34a' : '#dc2626';
+        content.push('<line x1="' + x.toFixed(2) + '" y1="' + yHigh.toFixed(2) + '" x2="' + x.toFixed(2) + '" y2="' + yLow.toFixed(2) + '" stroke="' + color + '" stroke-width="1.2"/>');
+        var tickW = Math.max(2, Math.min(10, step * 0.25));
+        content.push('<line x1="' + (x - tickW / 2).toFixed(2) + '" y1="' + yOpen.toFixed(2) + '" x2="' + (x + tickW / 2).toFixed(2) + '" y2="' + yOpen.toFixed(2) + '" stroke="' + color + '" stroke-width="1.2"/>');
+        content.push('<line x1="' + (x - tickW / 2).toFixed(2) + '" y1="' + yClose.toFixed(2) + '" x2="' + (x + tickW / 2).toFixed(2) + '" y2="' + yClose.toFixed(2) + '" stroke="' + color + '" stroke-width="1.2" opacity="0.95"/>');
+      }
+    } else {
+      // Candles (padrão)
+      for (var j2 = 0; j2 < candles.length; j2++) {
+        var c3 = candles[j2];
+        var x3 = xCenterForIdx(j2);
+        var yHigh3 = yFromPrice(c3.high);
+        var yLow3 = yFromPrice(c3.low);
+        var yOpen3 = yFromPrice(c3.open);
+        var yClose3 = yFromPrice(c3.close);
+        if (Math.abs(yHigh3 - yLow3) < 1) {
+          var mw = (yHigh3 + yLow3) / 2;
+          yHigh3 = mw - 3.5;
+          yLow3 = mw + 3.5;
+        }
+        if (Math.abs(yClose3 - yOpen3) < 1) {
+          var mb = (yOpen3 + yClose3) / 2;
+          yOpen3 = mb - 2.5;
+          yClose3 = mb + 2.5;
+        }
+        var up3 = c3.close >= c3.open;
+        var color3 = up3 ? '#16a34a' : '#dc2626';
+        var bodyTop3 = Math.min(yOpen3, yClose3);
+        var bodyH3 = Math.max(3, Math.abs(yClose3 - yOpen3));
+        content.push('<line x1="' + x3.toFixed(2) + '" y1="' + yHigh3.toFixed(2) + '" x2="' + x3.toFixed(2) + '" y2="' + yLow3.toFixed(2) + '" stroke="' + color3 + '" stroke-width="1.2"/>');
+        content.push('<rect x="' + (x3 - bodyW / 2).toFixed(2) + '" y="' + bodyTop3.toFixed(2) + '" width="' + bodyW.toFixed(2) + '" height="' + bodyH3.toFixed(2) + '" fill="' + color3 + '" fill-opacity="0.7" stroke="' + color3 + '"/>');
+      }
+    }
+
+    if (!trailingFocusMode) {
+      // Marcadores de status (mudança de status por candle)
+      var changes = statusChanges || [];
+      for (var ci = 0; ci < changes.length; ci++) {
+        var ch = changes[ci] || {};
+        var idx = Number(ch.idx);
+        if (!(idx >= 0 && idx < candles.length)) continue;
+        var label = ch.label == null ? '' : String(ch.label);
+        if (!label) continue;
+        var x = xCenterForIdx(idx);
+        var yTop = p + 6;
+        var yEnd = h - p;
+        content.push(
+          '<line x1="' + x.toFixed(2) + '" y1="' + yTop.toFixed(2) + '" x2="' + x.toFixed(2) + '" y2="' + yEnd.toFixed(2) + '" stroke="#fbbf24" stroke-opacity="0.55" stroke-width="1.0"/>'
+        );
+        content.push(
+          '<text x="' + x.toFixed(2) + '" y="' + (p + 14).toFixed(2) + '" font-size="10" fill="#fbbf24" text-anchor="middle" transform="rotate(-90 ' + x.toFixed(2) + ' ' + (p + 14).toFixed(2) + ')">' + esc(label) + '</text>'
+        );
+      }
+    }
+
+    if (!trailingFocusMode) {
+      // Marcações de trade (compra/venda)
+      var tms = tradeMarkers || [];
+      for (var tmi = 0; tmi < tms.length; tmi++) {
+        var tm = tms[tmi] || {};
+        var tidx = Number(tm.idx);
+        if (!(tidx >= 0 && tidx < candles.length)) continue;
+        var tc = candles[tidx] || {};
+        var tx = xCenterForIdx(tidx);
+        var ty = yFromPrice(tc.close);
+        var side = String(tm.side || '').toUpperCase();
+        var isBuy = side === 'BUY';
+        var color = isBuy ? '#22c55e' : '#ef4444';
+        var arrow = isBuy ? '▲' : '▼';
+        var qty = tm.quantity ? String(tm.quantity) : '';
+        var price = tm.price ? String(tm.price) : '';
+        var label = isBuy ? 'Compra' : 'Venda';
+        var tip = label + (qty ? (' qtd ' + qty) : '') + (price ? (' @ ' + price) : '');
+        content.push(
+          '<circle cx="' + tx.toFixed(2) + '" cy="' + ty.toFixed(2) + '" r="4.8" fill="' + color + '" fill-opacity="0.92" stroke="#0f172a" stroke-width="1" />'
+        );
+        content.push(
+          '<text x="' + tx.toFixed(2) + '" y="' + (ty + 3.3).toFixed(2) + '" font-size="8" fill="#ffffff" text-anchor="middle" title="' + esc(tip) + '">' + arrow + '</text>'
+        );
+      }
+    }
+
+    // Marcações de estratégia: uma por estratégia (última ocorrência), com anti-sobreposição.
+    var sms = strategyMarkers || [];
+    if (!trailingFocusMode && sms.length) {
+      var byKey = {};
+      var leafarMarkers = [];
+      var trendMarkers = [];
+      for (var si = 0; si < sms.length; si++) {
+        var m0 = sms[si] || {};
+        var k0 = String(m0.strategy_key || 'estrategia');
+        if (k0 === 'leafar') {
+          leafarMarkers.push(m0); // leafar mantém histórico visível por evento
+        } else if (k0 === 'tendencia_mercado') {
+          trendMarkers.push(m0); // tendência: mantém trilha e linha conectada
+        } else {
+          byKey[k0] = m0; // demais estratégias: última ocorrência por chave
+        }
+      }
+      function colorForStrategy(k) {
+        var palette = ['#d946ef', '#22c55e', '#f59e0b', '#38bdf8', '#ef4444', '#a3e635', '#f97316', '#60a5fa'];
+        var s = String(k || '');
+        var hsh = 0;
+        for (var iH = 0; iH < s.length; iH++) hsh = (hsh * 31 + s.charCodeAt(iH)) >>> 0;
+        return palette[hsh % palette.length];
+      }
+      function parseBracketLevels(msg) {
+        var out = { direction: '', entry: null, last: null, target: null, stop: null, sl_trigger: null, vol_major: null };
+        var s = String(msg || '');
+        if (!s) return out;
+        var parts = s.split(';');
+        for (var pi = 0; pi < parts.length; pi++) {
+          var seg = String(parts[pi] || '').trim();
+          var eq = seg.indexOf('=');
+          if (eq <= 0) continue;
+          var kk = seg.slice(0, eq).trim().toLowerCase();
+          var vraw = seg.slice(eq + 1).trim();
+          var v = Number(String(vraw).replace(',', '.'));
+          if (!isFinite(v)) v = null;
+          if (kk === 'direction' && vraw) out.direction = String(vraw).toUpperCase();
+          else if (kk === 'entry') out.entry = v;
+          else if (kk === 'last') out.last = v;
+          else if (kk === 'target') out.target = v;
+          else if (kk === 'sl') out.stop = v;
+          else if (kk === 'sl_trigger') out.sl_trigger = v;
+          else if (kk === 'stop') out.stop = v;
+          else if (kk === 'vol_major') out.vol_major = v;
+        }
+        return out;
+      }
+      function parseLeafarMarkerMessage(msg) {
+        return parseBracketLevels(msg);
+      }
+      var usedLabelY = [];
+      var usedPointSlots = {};
+      // Reduz poluição visual: mantém apenas os eventos mais recentes por estratégia.
+      var renderList = leafarMarkers.slice(-3);
+      var trendRaw = trendMarkers.slice(-18);
+      var trendRender = [];
+      var trendMinGapIdx = 2; // mais setas, porém espaçadas no eixo X (candles)
+      var lastTrendIdxKept = -99999;
+      for (var triGap = 0; triGap < trendRaw.length; triGap++) {
+        var tmGap = trendRaw[triGap] || {};
+        var tiGap = Number(tmGap.idx);
+        if (!isFinite(tiGap)) continue;
+        if ((tiGap - lastTrendIdxKept) < trendMinGapIdx) continue;
+        trendRender.push(tmGap);
+        lastTrendIdxKept = tiGap;
+      }
+      for (var tri = 0; tri < trendRender.length; tri++) renderList.push(trendRender[tri]);
+      var stratKeys = Object.keys(byKey).sort();
+      for (var skx = 0; skx < stratKeys.length; skx++) {
+        renderList.push(byKey[stratKeys[skx]]);
+      }
+      var latestBracketIdx = {};
+      for (var lbi = renderList.length - 1; lbi >= 0; lbi--) {
+        var sb0 = renderList[lbi] || {};
+        var kb0 = String(sb0.strategy_key || '');
+        if (kb0 in latestBracketIdx) continue;
+        var bx0 = parseBracketLevels(String(sb0.message || ''));
+        if (bx0.target != null && bx0.stop != null) {
+          latestBracketIdx[kb0] = lbi;
+        }
+      }
+      // Linha conectando tendência removida para reduzir ruído visual.
+      var latestLeafarIdx = -1;
+      for (var li = renderList.length - 1; li >= 0; li--) {
+        if (String((renderList[li] || {}).strategy_key || '') === 'leafar') {
+          latestLeafarIdx = li;
+          break;
+        }
+      }
+      var latestTrendIdx = -1;
+      for (var lti = renderList.length - 1; lti >= 0; lti--) {
+        if (String((renderList[lti] || {}).strategy_key || '') === 'tendencia_mercado') {
+          latestTrendIdx = lti;
+          break;
+        }
+      }
+      var latestHvnIdx = -1;
+      for (var lhi = renderList.length - 1; lhi >= 0; lhi--) {
+        if (String((renderList[lhi] || {}).strategy_key || '') === 'perfil_volume_montanhas') {
+          latestHvnIdx = lhi;
+          break;
+        }
+      }
+      for (var ski = 0; ski < renderList.length; ski++) {
+        var sm = renderList[ski] || {};
+        var key = String(sm.strategy_key || 'estrategia');
+        var sidx = Number(sm.idx);
+        if (!(sidx >= 0 && sidx < candles.length)) continue;
+        var baseX = xCenterForIdx(sidx);
+        var rawPrice = sm.price;
+        var priceNum = Number(rawPrice);
+        var baseY = isFinite(priceNum) ? yFromPrice(priceNum) : yFromPrice((candles[sidx] || {}).close);
+        var tip = key + (rawPrice ? (' @ ' + String(rawPrice)) : '');
+        var col = colorForStrategy(key);
+        var smMsg = String(sm.message || '');
+        var leafInfo = key === 'leafar' ? parseBracketLevels(smMsg) : null;
+        var isLeafarLatest = (key === 'leafar' && ski === latestLeafarIdx);
+        var isTrendLatest = (key === 'tendencia_mercado' && ski === latestTrendIdx);
+        var isHvnLatest = (key === 'perfil_volume_montanhas' && ski === latestHvnIdx);
+        var revMatch = smMsg.match(/revers[aã]o\s*\(estimada\)\s*:\s*(\d{1,3})%/i);
+        var revPct = revMatch && revMatch[1] ? revMatch[1] : '';
+        var trendDir = '';
+        if (key === 'tendencia_mercado') {
+          var dirMatch = smMsg.match(/dire[cç][aã]o:\s*(alta|baixa|lateralizado)/i);
+          if (dirMatch && dirMatch[1]) trendDir = String(dirMatch[1]).toLowerCase();
+        }
+        var slotK = String(sidx);
+        var slotN = usedPointSlots[slotK] || 0;
+        usedPointSlots[slotK] = slotN + 1;
+        var sx = baseX + (slotN * 4);
+        var sy = baseY + (slotN * 3);
+        var ly = Math.max(p + 12, sy - 10);
+        for (var ul = 0; ul < usedLabelY.length; ul++) {
+          if (Math.abs(ly - usedLabelY[ul]) < 12) {
+            ly = usedLabelY[ul] + 12;
+          }
+        }
+        usedLabelY.push(ly);
+        var showGuide = (
+          (key !== 'leafar' || isLeafarLatest) &&
+          (key !== 'tendencia_mercado' || isTrendLatest) &&
+          (key !== 'perfil_volume_montanhas' || isHvnLatest)
+        );
+        if (showGuide) {
+          content.push(
+            '<line x1="' + sx.toFixed(2) + '" y1="' + (p + 2).toFixed(2) + '" x2="' + sx.toFixed(2) + '" y2="' + (h - p).toFixed(2) + '" stroke="' + col + '" stroke-opacity="0.48" stroke-width="1.1"/>'
+          );
+          content.push(
+            '<line x1="' + p.toFixed(2) + '" y1="' + sy.toFixed(2) + '" x2="' + (plotRight - 2).toFixed(2) + '" y2="' + sy.toFixed(2) + '" stroke="' + col + '" stroke-opacity="0.38" stroke-width="1.0" stroke-dasharray="4 4"/>'
+          );
+        }
+        if (leafInfo && leafInfo.target !== null && isLeafarLatest) {
+          var isBuyLf = leafInfo.direction === 'BUY';
+          var isSellLf = leafInfo.direction === 'SELL';
+          var colTarget = '#22c55e';
+          var colStop = '#ef4444';
+          var yTarget = yFromPrice(leafInfo.target);
+          var yStop = null;
+          if (leafInfo.stop !== null) yStop = yFromPrice(leafInfo.stop);
+          var arrowDir = leafInfo.direction === 'BUY' ? '↑' : (leafInfo.direction === 'SELL' ? '↓' : '↔');
+          content.push(
+            '<line x1="' + p.toFixed(2) + '" y1="' + yTarget.toFixed(2) + '" x2="' + (plotRight - 2).toFixed(2) + '" y2="' + yTarget.toFixed(2) + '" stroke="' + colTarget + '" stroke-opacity="0.85" stroke-width="1.3" stroke-dasharray="2 3"/>'
+          );
+          if (yStop !== null) {
+            content.push(
+              '<line x1="' + p.toFixed(2) + '" y1="' + yStop.toFixed(2) + '" x2="' + (plotRight - 2).toFixed(2) + '" y2="' + yStop.toFixed(2) + '" stroke="' + colStop + '" stroke-opacity="0.82" stroke-width="1.2" stroke-dasharray="5 4"/>'
+            );
+            content.push(
+              '<text x="' + (sx + 8).toFixed(2) + '" y="' + (Math.max(p + 10, yStop - 4)).toFixed(2) + '" font-size="10" fill="' + colStop + '" text-anchor="start">stop perda ' + esc(fmtPrice(leafInfo.stop)) + '</text>'
+            );
+          }
+          if (leafInfo.vol_major !== null && isFinite(Number(leafInfo.vol_major))) {
+            var yMajor = yFromPrice(leafInfo.vol_major);
+            var colMajor = '#f59e0b';
+            content.push(
+              '<line x1="' + p.toFixed(2) + '" y1="' + yMajor.toFixed(2) + '" x2="' + (plotRight - 2).toFixed(2) + '" y2="' + yMajor.toFixed(2) + '" stroke="' + colMajor + '" stroke-opacity="0.9" stroke-width="1.45" stroke-dasharray="2 2"/>'
+            );
+            content.push(
+              '<text x="' + (sx + 8).toFixed(2) + '" y="' + (Math.max(p + 10, yMajor - 4)).toFixed(2) + '" font-size="10" fill="' + colMajor + '" text-anchor="start">volume acumulado #1 ' + esc(fmtPrice(leafInfo.vol_major)) + '</text>'
+            );
+          }
+          content.push(
+            '<line x1="' + sx.toFixed(2) + '" y1="' + sy.toFixed(2) + '" x2="' + sx.toFixed(2) + '" y2="' + yTarget.toFixed(2) + '" stroke="' + col + '" stroke-opacity="0.82" stroke-width="1.15"/>'
+          );
+          var entLf = leafInfo.entry != null ? ('entrada ' + esc(fmtPrice(leafInfo.entry)) + ' · ') : '';
+          content.push(
+            '<text x="' + (sx + 8).toFixed(2) + '" y="' + (Math.max(p + 10, yTarget - 4)).toFixed(2) + '" font-size="10" fill="' + colTarget + '" text-anchor="start">' + entLf + 'alvo / stop gain ' + esc(fmtPrice(leafInfo.target)) + ' ' + arrowDir + '</text>'
+          );
+        }
+        var othBrk = (key !== 'leafar' && key !== 'tendencia_mercado') ? parseBracketLevels(smMsg) : null;
+        if (othBrk && othBrk.target != null && othBrk.stop != null && latestBracketIdx[key] === ski) {
+          var yT2 = yFromPrice(othBrk.target);
+          var yS2 = yFromPrice(othBrk.stop);
+          var colT2 = '#4ade80';
+          var colS2 = '#f87171';
+          content.push(
+            '<line x1="' + p.toFixed(2) + '" y1="' + yT2.toFixed(2) + '" x2="' + (plotRight - 2).toFixed(2) + '" y2="' + yT2.toFixed(2) + '" stroke="' + colT2 + '" stroke-opacity="0.78" stroke-width="1.2" stroke-dasharray="3 3"/>'
+          );
+          content.push(
+            '<line x1="' + p.toFixed(2) + '" y1="' + yS2.toFixed(2) + '" x2="' + (plotRight - 2).toFixed(2) + '" y2="' + yS2.toFixed(2) + '" stroke="' + colS2 + '" stroke-opacity="0.78" stroke-width="1.2" stroke-dasharray="5 3"/>'
+          );
+          content.push(
+            '<text x="' + (sx + 8).toFixed(2) + '" y="' + (Math.max(p + 10, yT2 - 4)).toFixed(2) + '" font-size="10" fill="' + colT2 + '" text-anchor="start">' + esc(key) + ' · gain ' + esc(fmtPrice(othBrk.target)) + '</text>'
+          );
+          content.push(
+            '<text x="' + (sx + 8).toFixed(2) + '" y="' + (Math.max(p + 10, yS2 - 4)).toFixed(2) + '" font-size="10" fill="' + colS2 + '" text-anchor="start">' + esc(key) + ' · loss ' + esc(fmtPrice(othBrk.stop)) + '</text>'
+          );
+          if (othBrk.entry != null && isFinite(Number(othBrk.entry))) {
+            var yE2 = yFromPrice(othBrk.entry);
+            content.push(
+              '<line x1="' + p.toFixed(2) + '" y1="' + yE2.toFixed(2) + '" x2="' + (plotRight - 2).toFixed(2) + '" y2="' + yE2.toFixed(2) + '" stroke="' + col + '" stroke-opacity="0.5" stroke-width="1" stroke-dasharray="2 4"/>'
+            );
+            content.push(
+              '<text x="' + (plotRight - 8).toFixed(2) + '" y="' + (Math.max(p + 10, yE2 - 4)).toFixed(2) + '" font-size="9" fill="#cbd5e1" text-anchor="end">entrada ' + esc(fmtPrice(othBrk.entry)) + '</text>'
+            );
+          }
+        }
+        if (key === 'tendencia_mercado') {
+          var trendColor = '#22c55e';
+          var x2 = sx + 10.0;
+          var y2 = sy - 10.0;
+          if (trendDir === 'baixa') {
+            trendColor = '#ef4444';
+            x2 = sx + 10.0;
+            y2 = sy + 10.0;
+          } else if (trendDir === 'lateralizado') {
+            trendColor = '#7dd3fc';
+            x2 = sx + 11.0;
+            y2 = sy;
+          }
+          var head = isTrendLatest ? 3.3 : 2.7;
+          // Seta destacada: haste maior + halo.
+          content.push(
+            '<line x1="' + sx.toFixed(2) + '" y1="' + sy.toFixed(2) + '" x2="' + x2.toFixed(2) + '" y2="' + y2.toFixed(2) + '" stroke="#0f172a" stroke-opacity="' + (isTrendLatest ? '0.75' : '0.55') + '" stroke-width="' + (isTrendLatest ? '4.4' : '3.4') + '" stroke-linecap="round"/>'
+          );
+          content.push(
+            '<line x1="' + sx.toFixed(2) + '" y1="' + sy.toFixed(2) + '" x2="' + x2.toFixed(2) + '" y2="' + y2.toFixed(2) + '" stroke="' + trendColor + '" stroke-opacity="' + (isTrendLatest ? '0.98' : '0.85') + '" stroke-width="' + (isTrendLatest ? '2.8' : '2.2') + '" stroke-linecap="round"><title>' + esc(tip) + '</title></line>'
+          );
+          content.push(
+            '<line x1="' + x2.toFixed(2) + '" y1="' + y2.toFixed(2) + '" x2="' + (x2 - head).toFixed(2) + '" y2="' + (y2 + (trendDir === 'baixa' ? -head : head)).toFixed(2) + '" stroke="' + trendColor + '" stroke-opacity="' + (isTrendLatest ? '0.98' : '0.85') + '" stroke-width="' + (isTrendLatest ? '2.6' : '2.0') + '" stroke-linecap="round"/>'
+          );
+          content.push(
+            '<line x1="' + x2.toFixed(2) + '" y1="' + y2.toFixed(2) + '" x2="' + (x2 - head).toFixed(2) + '" y2="' + (y2 + (trendDir === 'baixa' ? head : -head)).toFixed(2) + '" stroke="' + trendColor + '" stroke-opacity="' + (isTrendLatest ? '0.98' : '0.85') + '" stroke-width="' + (isTrendLatest ? '2.6' : '2.0') + '" stroke-linecap="round"/>'
+          );
+        } else {
+          content.push(
+            '<circle cx="' + sx.toFixed(2) + '" cy="' + sy.toFixed(2) + '" r="' + ((key === 'leafar' && !isLeafarLatest) || (key === 'tendencia_mercado' && !isTrendLatest) || (key === 'perfil_volume_montanhas' && !isHvnLatest) ? '3.2' : '5.0') + '" fill="' + col + '" fill-opacity="' + ((key === 'leafar' && !isLeafarLatest) || (key === 'tendencia_mercado' && !isTrendLatest) || (key === 'perfil_volume_montanhas' && !isHvnLatest) ? '0.30' : '0.88') + '" stroke="#ffffff" stroke-width="1.0"><title>' + esc(tip) + '</title></circle>'
+          );
+        }
+        if (key === 'tendencia_mercado' && isTrendLatest && revPct) {
+          var revY = Math.max(p + 14, sy - 28);
+          content.push(
+            '<rect x="' + (sx + 6).toFixed(2) + '" y="' + (revY - 11).toFixed(2) + '" width="108" height="16" rx="6" fill="rgba(15,23,42,0.92)" stroke="#38bdf8" stroke-width="1.2"/>'
+          );
+          content.push(
+            '<text x="' + (sx + 14).toFixed(2) + '" y="' + revY.toFixed(2) + '" font-size="11" fill="#e2e8f0" font-weight="600" text-anchor="start">reversão ~' + esc(revPct) + '%</text>'
+          );
+        }
+        if (showGuide) {
+          content.push(
+            '<text x="' + (sx + 8).toFixed(2) + '" y="' + ly.toFixed(2) + '" font-size="10" fill="' + col + '" text-anchor="start">' + esc(key) + '</text>'
+          );
+        }
+      }
+    }
+
+    // Valor no lado direito (último close visível)
+    var lastVis = candles[candles.length - 1];
+    if (lastVis && lastVis.close !== undefined && lastVis.close !== null) {
+      var yLast = yFromPrice(lastVis.close);
+      content.push(
+        '<text x="' + (plotRight - 4).toFixed(2) + '" y="' + (yLast + 4).toFixed(2) + '" font-size="12" fill="#e5e7eb" text-anchor="end">' + fmtPrice(lastVis.close) + '</text>'
+      );
+    }
+
+    if (vpEnabled && !trailingFocusMode) {
+      var vpSource = candles;
+      if (vpHistoricalEnabled && allCandles && allCandles.length) {
+        if (allCandles.length <= VP_HISTORICAL_MAX_CANDLES) {
+          vpSource = allCandles;
+        } else {
+          var half = Math.floor(VP_HISTORICAL_MAX_CANDLES / 2);
+          var center = Math.min(
+            windowStart + Math.floor(VIEW_WINDOW / 2),
+            allCandles.length - 1
+          );
+          var lo = Math.max(0, center - half);
+          var hi = Math.min(allCandles.length, lo + VP_HISTORICAL_MAX_CANDLES);
+          lo = Math.max(0, hi - VP_HISTORICAL_MAX_CANDLES);
+          vpSource = allCandles.slice(lo, hi);
+        }
+      }
+      var binsCount = Math.max(8, Math.min(80, Number(vpBins) || 24));
+      var span = max - min;
+      var bins = [];
+      for (var bi = 0; bi < binsCount; bi++) bins.push(0);
+      function priceToBin(px) {
+        var r = (Number(px) - min) / span;
+        var idx = Math.floor(r * binsCount);
+        if (idx < 0) idx = 0;
+        if (idx >= binsCount) idx = binsCount - 1;
+        return idx;
+      }
+      for (var ci2 = 0; ci2 < vpSource.length; ci2++) {
+        var cc = vpSource[ci2] || {};
+        var vol = Number(cc.volume || 0);
+        if (!isFinite(vol) || vol <= 0) continue;
+        var closePx = Number(cc.close);
+        if (!isFinite(closePx)) continue;
+        bins[priceToBin(closePx)] += vol;
+      }
+      var vpMax = 0;
+      var pocIdx = 0;
+      for (var bmx = 0; bmx < bins.length; bmx++) {
+        if (bins[bmx] > vpMax) {
+          vpMax = bins[bmx];
+          pocIdx = bmx;
+        }
+      }
+      var topBinIdx = [];
+      for (var tbi = 0; tbi < bins.length; tbi++) topBinIdx.push(tbi);
+      topBinIdx.sort(function(a, b) { return bins[b] - bins[a]; });
+      topBinIdx = topBinIdx.slice(0, 5).filter(function(idx) { return bins[idx] > 0; });
+      var hvnTopIdx = topBinIdx.slice(0, 3);
+      for (var hvnI = 0; hvnI < hvnTopIdx.length; hvnI++) {
+        var hb = hvnTopIdx[hvnI];
+        var hVol = Number(bins[hb] || 0);
+        if (!(hVol > 0)) continue;
+        var hLowPx = min + (hb * span / binsCount);
+        var hHighPx = min + ((hb + 1) * span / binsCount);
+        var hMidPx = (hLowPx + hHighPx) / 2;
+        var hY = yFromPrice(hMidPx);
+        var hCol = hvnI === 0 ? '#f59e0b' : (hvnI === 1 ? '#fbbf24' : '#fde68a');
+        content.push(
+          '<line x1="' + p.toFixed(2) + '" y1="' + hY.toFixed(2) + '" x2="' + (plotRight - 2).toFixed(2) + '" y2="' + hY.toFixed(2) + '" stroke="' + hCol + '" stroke-opacity="' + (hvnI === 0 ? '0.92' : '0.72') + '" stroke-width="' + (hvnI === 0 ? '1.5' : '1.2') + '" stroke-dasharray="' + (hvnI === 0 ? '2 2' : '5 3') + '"/>'
+        );
+        content.push(
+          '<text x="' + (plotRight - 6).toFixed(2) + '" y="' + (Math.max(p + 10, hY - 4)).toFixed(2) + '" font-size="9" fill="' + hCol + '" text-anchor="end">HVN #' + String(hvnI + 1) + ' ' + esc(fmtPrice(hMidPx)) + ' (' + esc(String(Math.round(hVol))) + ')</text>'
+        );
+      }
+      var vpX0 = plotRight + 10;
+      var vpW = Math.max(40, vpAreaW - 22);
+      content.push('<line x1="' + (plotRight + 2).toFixed(2) + '" y1="' + p.toFixed(2) + '" x2="' + (plotRight + 2).toFixed(2) + '" y2="' + (h - p).toFixed(2) + '" stroke="#334155" stroke-opacity="0.9"/>');
+      content.push('<text x="' + (vpX0 + vpW / 2).toFixed(2) + '" y="' + (p - 8).toFixed(2) + '" font-size="10" fill="#94a3b8" text-anchor="middle">VP</text>');
+      for (var vb = 0; vb < binsCount; vb++) {
+        var vv = bins[vb];
+        var bw = vpMax > 0 ? (vv / vpMax) * vpW : 0;
+        var binLowPx = min + (vb * span / binsCount);
+        var binHighPx = min + ((vb + 1) * span / binsCount);
+        var yA = yFromPrice(binLowPx);
+        var yB = yFromPrice(binHighPx);
+        var yTop = Math.min(yA, yB);
+        var yBottom = Math.max(yA, yB);
+        var barH = Math.max(1, yBottom - yTop - 1);
+        var isTop5 = topBinIdx.indexOf(vb) >= 0;
+        var topRank = isTop5 ? (topBinIdx.indexOf(vb) + 1) : 0;
+        var isPoc = vb === pocIdx && vv > 0;
+        var barFill = '#22c55e';
+        var barOpacity = '0.45';
+        if (isTop5) {
+          barFill = '#f59e0b';
+          barOpacity = topRank === 1 ? '0.92' : '0.70';
+        }
+        content.push(
+          '<rect x="' + vpX0.toFixed(2) + '" y="' + yTop.toFixed(2) + '" width="' + bw.toFixed(2) + '" height="' + barH.toFixed(2) + '" fill="' + barFill + '" fill-opacity="' + barOpacity + '"/>'
+        );
+        if (isTop5) {
+          content.push(
+            '<text x="' + (vpX0 + 3).toFixed(2) + '" y="' + (yTop + Math.max(9, barH * 0.72)).toFixed(2) + '" font-size="9" fill="#f8fafc" text-anchor="start">#' + String(topRank) + '</text>'
+          );
+        }
+      }
+      if (vpLabelsEnabled && vpMax > 0) {
+        var labelCandidates = [];
+        for (var li = 0; li < topBinIdx.length; li++) {
+          var idxL = topBinIdx[li];
+          var vL = bins[idxL];
+          if (!(vL > 0)) continue;
+          var bwL = (vL / vpMax) * vpW;
+          var lLowPx = min + (idxL * span / binsCount);
+          var lHighPx = min + ((idxL + 1) * span / binsCount);
+          var lyA = yFromPrice(lLowPx);
+          var lyB = yFromPrice(lHighPx);
+          var yMidL = ((Math.min(lyA, lyB) + Math.max(lyA, lyB)) / 2) + 4;
+          var xTxt = vpX0 + Math.min(vpW - 2, Math.max(18, bwL - 2));
+          labelCandidates.push({
+            x: xTxt,
+            y: yMidL,
+            txt: String(Math.round(vL))
+          });
+        }
+        // Evita sobreposição dos números no VP: distribui com gap mínimo.
+        labelCandidates.sort(function(a, b) { return a.y - b.y; });
+        var minGap = 12;
+        var yMin = p + 10;
+        var yMax = h - p - 4;
+        for (var lc = 0; lc < labelCandidates.length; lc++) {
+          var prevY = lc > 0 ? labelCandidates[lc - 1].y : (yMin - minGap);
+          var yAdj = Math.max(labelCandidates[lc].y, prevY + minGap);
+          labelCandidates[lc].y = Math.min(yAdj, yMax);
+        }
+        for (var rc = labelCandidates.length - 2; rc >= 0; rc--) {
+          if (labelCandidates[rc + 1].y - labelCandidates[rc].y < minGap) {
+            labelCandidates[rc].y = Math.max(yMin, labelCandidates[rc + 1].y - minGap);
+          }
+        }
+        for (var ld = 0; ld < labelCandidates.length; ld++) {
+          var cLbl = labelCandidates[ld];
+          content.push(
+            '<text x="' + cLbl.x.toFixed(2) + '" y="' + cLbl.y.toFixed(2) + '" font-size="10" fill="#e2e8f0" text-anchor="end">' + esc(cLbl.txt) + '</text>'
+          );
+        }
+      }
+    }
+
+    // Bracket / trailing: no modo foco — só linhas fortes + rastro antigo; fora — estilo anterior.
+    var focusTrailUi = trailingFocusMode && blLanes.length > 0;
+    if (focusTrailUi && trailPriceHistory.length > 1) {
+      for (var gi = 0; gi < trailPriceHistory.length - 1; gi++) {
+        var snapG = trailPriceHistory[gi] || {};
+        var age = gi / Math.max(1, trailPriceHistory.length - 2);
+        var opG = 0.1 + 0.22 * age;
+        if (isFinite(snapG.tp)) {
+          var ygT = yFromPrice(snapG.tp);
+          content.push(
+            '<line x1="' + p.toFixed(2) + '" y1="' + ygT.toFixed(2) + '" x2="' + (plotRight - 2).toFixed(2) + '" y2="' + ygT.toFixed(2) + '" stroke="#4ade80" stroke-opacity="' + opG.toFixed(3) + '" stroke-width="1" stroke-dasharray="5 7"/>'
+          );
+        }
+        if (isFinite(snapG.sl)) {
+          var ygS = yFromPrice(snapG.sl);
+          content.push(
+            '<line x1="' + p.toFixed(2) + '" y1="' + ygS.toFixed(2) + '" x2="' + (plotRight - 2).toFixed(2) + '" y2="' + ygS.toFixed(2) + '" stroke="#fb7185" stroke-opacity="' + opG.toFixed(3) + '" stroke-width="1" stroke-dasharray="5 7"/>'
+          );
+        }
+      }
+    }
+    var trailBadgeY = p + 14;
+    var trailRows = [];
+    for (var bix = 0; bix < blLanes.length; bix++) {
+      var BX = blLanes[bix] || {};
+      var laneStr = String(BX.lane || '');
+      var laneTag = laneStr.indexOf('replay') >= 0 ? 'replay' : 'corretora';
+      var opId = String(BX.operation_id || '').trim();
+      var opShort = opId ? opId.slice(-6) : '—';
+      var sideTxt = String(BX.entry_side || '').toUpperCase();
+      var anchor = BX.entry_anchor != null ? Number(BX.entry_anchor) : null;
+      var latestPx = BX.last != null ? Number(BX.last) : null;
+      var btpL = BX.tp_price != null ? Number(BX.tp_price) : null;
+      var bslL = BX.sl_trigger != null ? Number(BX.sl_trigger) : null;
+      var srcB = String(BX.strategy_source || '').slice(0, 14);
+      if (anchor !== null && isFinite(anchor)) {
+        var yEnt = yFromPrice(anchor);
+        var entW = focusTrailUi ? '2.65' : '1.35';
+        var entDash = focusTrailUi ? '' : ' stroke-dasharray="3 4"';
+        content.push(
+          '<line x1="' + p.toFixed(2) + '" y1="' + yEnt.toFixed(2) + '" x2="' + (plotRight - 2).toFixed(2) + '" y2="' + yEnt.toFixed(2) + '" stroke="#e2e8f0" stroke-opacity="' + (focusTrailUi ? '0.95' : '0.55') + '" stroke-width="' + entW + '"' + entDash + '/>'
+        );
+        content.push(
+          '<text x="' + (p + 4).toFixed(2) + '" y="' + (Math.max(p + 10, yEnt - 5)).toFixed(2) + '" font-size="' + (focusTrailUi ? '11' : '9') + '" fill="#f1f5f9" font-weight="' + (focusTrailUi ? '600' : '400') + '" text-anchor="start">Entrada ' + esc(fmtPrice(anchor)) + '</text>'
+        );
+      }
+      if (btpL !== null && isFinite(btpL)) {
+        var yblTP = yFromPrice(btpL);
+        if (focusTrailUi) {
+          content.push(
+            '<line x1="' + p.toFixed(2) + '" y1="' + yblTP.toFixed(2) + '" x2="' + (plotRight - 2).toFixed(2) + '" y2="' + yblTP.toFixed(2) + '" stroke="#4ade80" stroke-opacity="0.98" stroke-width="2.75"/>'
+          );
+          content.push(
+            '<text x="' + (p + 4).toFixed(2) + '" y="' + (Math.max(p + 10, yblTP - 5)).toFixed(2) + '" font-size="11" fill="#86efac" font-weight="600" text-anchor="start">Stop gain ' + esc(fmtPrice(btpL)) + '</text>'
+          );
+        } else {
+          content.push(
+            '<line x1="' + p.toFixed(2) + '" y1="' + yblTP.toFixed(2) + '" x2="' + (plotRight - 2).toFixed(2) + '" y2="' + yblTP.toFixed(2) + '" stroke="#22d3ee" stroke-opacity="0.92" stroke-width="1.35" stroke-dasharray="2 2"/>'
+          );
+          content.push(
+            '<circle cx="' + (plotRight - 8).toFixed(2) + '" cy="' + yblTP.toFixed(2) + '" r="3.4" fill="#22d3ee" fill-opacity="0.95"/>'
+          );
+          content.push(
+            '<text x="' + (p + 4).toFixed(2) + '" y="' + (Math.max(p + 10, yblTP - 3)).toFixed(2) + '" font-size="10" fill="#a5f3fc" text-anchor="start">TP vivo · ' + esc(laneTag) + (srcB ? ' · ' + esc(srcB) : '') + ' ' + esc(fmtPrice(btpL)) + '</text>'
+          );
+        }
+      }
+      if (bslL !== null && isFinite(bslL)) {
+        var yblSL = yFromPrice(bslL);
+        if (focusTrailUi) {
+          content.push(
+            '<line x1="' + p.toFixed(2) + '" y1="' + yblSL.toFixed(2) + '" x2="' + (plotRight - 2).toFixed(2) + '" y2="' + yblSL.toFixed(2) + '" stroke="#f87171" stroke-opacity="0.98" stroke-width="2.75"/>'
+          );
+          content.push(
+            '<text x="' + (p + 4).toFixed(2) + '" y="' + (Math.min(h - p - 2, yblSL + 13)).toFixed(2) + '" font-size="11" fill="#fecaca" font-weight="600" text-anchor="start">Stop loss ' + esc(fmtPrice(bslL)) + '</text>'
+          );
+        } else {
+          content.push(
+            '<line x1="' + p.toFixed(2) + '" y1="' + yblSL.toFixed(2) + '" x2="' + (plotRight - 2).toFixed(2) + '" y2="' + yblSL.toFixed(2) + '" stroke="#fb923c" stroke-opacity="0.9" stroke-width="1.35" stroke-dasharray="4 3"/>'
+          );
+          content.push(
+            '<circle cx="' + (plotRight - 8).toFixed(2) + '" cy="' + yblSL.toFixed(2) + '" r="3.6" fill="#fb923c" fill-opacity="0.96"/>'
+          );
+          content.push(
+            '<text x="' + (p + 4).toFixed(2) + '" y="' + (Math.min(h - p - 2, yblSL + 11)).toFixed(2) + '" font-size="10" fill="#fdba74" text-anchor="start">SL vivo · ' + esc(laneTag) + ' ' + esc(fmtPrice(bslL)) + '</text>'
+          );
+        }
+      }
+      var pnlTrail = '';
+      if (isFinite(anchor) && isFinite(latestPx) && anchor !== 0 && isFinite(Number(anchor))) {
+        var diff = (Number(latestPx) - Number(anchor));
+        if (sideTxt === 'SELL') diff = -diff;
+        pnlTrail = ' · mov=' + (diff >= 0 ? '+' : '') + fmtPrice(diff);
+      }
+      if (!focusTrailUi) {
+        var badgeText = 'TRAIL ' + esc(laneTag) + ' · op#' + esc(opShort) + (sideTxt ? (' · ' + esc(sideTxt)) : '') + pnlTrail;
+        content.push(
+          '<text x="' + (plotRight - 6).toFixed(2) + '" y="' + trailBadgeY.toFixed(2) + '" font-size="10" fill="#e2e8f0" text-anchor="end">' + badgeText + '</text>'
+        );
+        trailBadgeY += 12;
+      }
+      var dSL = '';
+      if (isFinite(latestPx) && isFinite(bslL)) {
+        dSL = fmtPrice(Math.abs(Number(latestPx) - Number(bslL)));
+      }
+      var dTP = '';
+      if (isFinite(latestPx) && isFinite(btpL)) {
+        dTP = fmtPrice(Math.abs(Number(btpL) - Number(latestPx)));
+      }
+      trailRows.push({
+        lane: laneTag,
+        op: opShort,
+        side: sideTxt || '—',
+        entry: isFinite(anchor) ? fmtPrice(anchor) : '—',
+        last: isFinite(latestPx) ? fmtPrice(latestPx) : '—',
+        sl: isFinite(bslL) ? fmtPrice(bslL) : '—',
+        tp: isFinite(btpL) ? fmtPrice(btpL) : '—',
+        dsl: dSL || '—',
+        dtp: dTP || '—',
+      });
+    }
+
+    if (trailRows.length) {
+      var padBox = 8;
+      var lh = 12;
+      if (focusTrailUi) {
+        var r0 = trailRows[0] || {};
+        var oneL = 'op#' + esc(r0.op) + ' · ' + esc(r0.side) + ' · últ.' + esc(r0.last) + ' · ΔTP ' + esc(r0.dtp) + ' · ΔSL ' + esc(r0.dsl);
+        var boxWf = Math.min(420, Math.max(280, Math.round((plotRight - p) * 0.55)));
+        var boxHf = 44;
+        var bx0f = Math.max(p + 4, plotRight - boxWf - 8);
+        var by0f = p + 6;
+        content.push(
+          '<rect x="' + bx0f.toFixed(2) + '" y="' + by0f.toFixed(2) + '" width="' + boxWf.toFixed(2) + '" height="' + boxHf.toFixed(2) + '" rx="8" fill="rgba(2,6,23,0.82)" stroke="#22c55e" stroke-width="1.2"/>'
+        );
+        content.push(
+          '<text x="' + (bx0f + padBox).toFixed(2) + '" y="' + (by0f + 14).toFixed(2) + '" font-size="10" fill="#86efac" font-weight="600" text-anchor="start">TRAILING (foco)</text>'
+        );
+        content.push(
+          '<text x="' + (bx0f + padBox).toFixed(2) + '" y="' + (by0f + 30).toFixed(2) + '" font-size="9.5" fill="#e2e8f0" text-anchor="start">' + oneL + '</text>'
+        );
+      } else {
+        var boxW = Math.min(360, Math.max(260, Math.round((plotRight - p) * 0.42)));
+        var boxH = padBox * 2 + lh * (trailRows.length + 2);
+        var bx0 = Math.max(p + 4, plotRight - boxW - 8);
+        var by0 = p + 6;
+        content.push(
+          '<rect x="' + bx0.toFixed(2) + '" y="' + by0.toFixed(2) + '" width="' + boxW.toFixed(2) + '" height="' + boxH.toFixed(2) + '" rx="7" fill="rgba(2,6,23,0.78)" stroke="#334155" stroke-width="1"/>'
+        );
+        content.push(
+          '<text x="' + (bx0 + padBox).toFixed(2) + '" y="' + (by0 + 11).toFixed(2) + '" font-size="10" fill="#93c5fd" text-anchor="start">TRAILING ATIVO (ordens abertas)</text>'
+        );
+        content.push(
+          '<text x="' + (bx0 + padBox).toFixed(2) + '" y="' + (by0 + 23).toFixed(2) + '" font-size="9" fill="#94a3b8" text-anchor="start">lane/op · lado · entrada/último · SL(d) · TP(d)</text>'
+        );
+        for (var tr = 0; tr < trailRows.length; tr++) {
+          var r = trailRows[tr];
+          var ty = by0 + padBox + lh * (tr + 3);
+          var line = (
+            r.lane + '/#' + r.op +
+            ' · ' + r.side +
+            ' · ' + r.entry + '/' + r.last +
+            ' · SL ' + r.sl + ' (' + r.dsl + ')' +
+            ' · TP ' + r.tp + ' (' + r.dtp + ')'
+          );
+          content.push(
+            '<text x="' + (bx0 + padBox).toFixed(2) + '" y="' + ty.toFixed(2) + '" font-size="9.5" fill="#e2e8f0" text-anchor="start">' + esc(line) + '</text>'
+          );
+        }
+      }
+    }
+
+    svg.innerHTML = content.join('');
+    if (trailingFocusMode && volSvg) {
+      volSvg.innerHTML = '';
+      return;
+    }
+
+    function fmtVol(v) {
+      var n = Number(v);
+      if (!isFinite(n)) return '0';
+      return String(Math.round(n));
+    }
+
+    var volContent = [];
+    volContent.push(
+      '<line x1="' + vp + '" y1="' + (vh - vp) + '" x2="' + (vw - vp) + '" y2="' + (vh - vp) + '" stroke="currentColor" stroke-opacity="0.25"/>'
+    );
+    var vPlotW = vw - (2 * vp);
+    var vStep = vPlotW / Math.max(1, slotCount);
+    function vXCenterForIdx(jj) {
+      return vp + ((slotOffset + jj) * vStep) + (vStep / 2);
+    }
+    var vBar = Math.max(2, Math.min(14, vStep * 0.6));
+
+    // Grade horizontal do volume (sem etiquetas extras)
+    var vTickCount = 4;
+    var vSpan = vh - 2 * vp;
+    for (var vti = 0; vti <= vTickCount; vti++) {
+      var vRatioTop = vti / vTickCount; // 0 = topo, 1 = base
+      var vy = vp + vSpan * vRatioTop;
+      volContent.push(
+        '<line x1="' + vp.toFixed(2) + '" y1="' + vy.toFixed(2) + '" x2="' + (vw - vp).toFixed(2) + '" y2="' + vy.toFixed(2) + '" stroke="currentColor" stroke-opacity="0.10"/>'
+      );
+    }
+
+    var volPts = [];
+    var maxIdx = 0;
+    for (var mi = 0; mi < candles.length; mi++) {
+      var mv = candles[mi].volume || 0;
+      if ((candles[maxIdx].volume || 0) < mv) maxIdx = mi;
+    }
+
+    for (var k = 0; k < candles.length; k++) {
+      var cv = candles[k];
+      var vx = vXCenterForIdx(k);
+      var ratio = maxVol > 0 ? (cv.volume || 0) / maxVol : 0;
+      var barH = Math.max(1, ratio * (vh - (2 * vp)));
+      var yBarTop = (vh - vp - barH);
+      volContent.push(
+        '<rect x="' + (vx - vBar / 2).toFixed(2) + '" y="' + yBarTop.toFixed(2) + '" width="' + vBar.toFixed(2) + '" height="' + barH.toFixed(2) + '" fill="#2563eb" fill-opacity="0.6"/>'
+      );
+      volPts.push(vx.toFixed(2) + ',' + (yBarTop).toFixed(2));
+    }
+
+    // Linha de volume (overlay)
+    volContent.push(
+      '<polyline points="' + volPts.join(' ') + '" fill="none" stroke="#93c5fd" stroke-width="1.4" stroke-opacity="0.95"/>'
+    );
+
+    // Números: máximo e último ponto (evita poluição com 120 etiquetas)
+    var lastIdx = candles.length - 1;
+    var lastC = candles[lastIdx];
+    var lastX = vXCenterForIdx(lastIdx);
+    var lastRatio = maxVol > 0 ? (lastC.volume || 0) / maxVol : 0;
+    var lastBarH = Math.max(1, lastRatio * (vh - (2 * vp)));
+    var lastY = (vh - vp - lastBarH);
+    volContent.push(
+      '<text x="' + lastX.toFixed(2) + '" y="' + (lastY - 6).toFixed(2) + '" font-size="11" fill="#93c5fd" text-anchor="middle">' + fmtVol(lastC.volume || 0) + '</text>'
+    );
+
+    if (maxIdx !== lastIdx) {
+      var maxC = candles[maxIdx];
+      var maxX = vXCenterForIdx(maxIdx);
+      var maxRatio = maxVol > 0 ? (maxC.volume || 0) / maxVol : 0;
+      var maxBarH = Math.max(1, maxRatio * (vh - (2 * vp)));
+      var maxY = (vh - vp - maxBarH);
+      volContent.push(
+        '<text x="' + maxX.toFixed(2) + '" y="' + (maxY - 6).toFixed(2) + '" font-size="11" fill="#bfdbfe" text-anchor="middle">' + fmtVol(maxC.volume || 0) + '</text>'
+      );
+    }
+
+    volSvg.innerHTML = volContent.join('');
+  }
+
+  /**
+   * Após o 1º chunk, não encadeia o dia inteiro: só pede o próximo trecho quando
+   * a janela se aproxima do fim dos candles já carregados (ou se o trecho veio vazio e ainda há mais).
+   */
+  function progressiveTailNeedFetch() {
+    var len = allCandles ? allCandles.length : 0;
+    if (len === 0) return progressiveMorePending;
+    var maxStart = Math.max(0, len - VIEW_WINDOW);
+    var viewEnd = windowStart + VIEW_WINDOW;
+    if (viewEnd >= len - PROGRESSIVE_EDGE_CANDLES) return true;
+    if (windowStart >= maxStart - 1) return true;
+    return false;
+  }
+
+  function buildProgressiveFetchUrl(chunkIdx, segIdx) {
+    var t = (tickerInput.value || '').trim().toUpperCase();
+    var interval = intervalSelect.value || '1m';
+    return (
+      endpoint +
+      '?ticker=' +
+      encodeURIComponent(t) +
+      '&interval=' +
+      encodeURIComponent(interval) +
+      '&limit=' +
+      encodeURIComponent(String(PROGRESSIVE_FETCH_LIMIT)) +
+      '&progressive=1&chunk_index=' +
+      encodeURIComponent(String(chunkIdx)) +
+      '&segment_index=' +
+      encodeURIComponent(String(segIdx)) +
+      '&chunk_hours=' +
+      encodeURIComponent(String(PROGRESSIVE_CHUNK_HOURS)) +
+      sessionDateQuery() +
+      replayCandlesQuery()
+    );
+  }
+
+  /**
+   * Após o 1º GET, encadeia imediatamente (setTimeout 0) cada bloco de 1000 snapshots até o fim do dia.
+   */
+  function runProgressiveChain(seq, chunkIdx, segIdx) {
+    if (seq !== candlesReqSeq) return;
+    progressiveChainActive = true;
+    progressiveTailInflight = true;
+    var url = buildProgressiveFetchUrl(chunkIdx, segIdx);
+    var fetchOpts = {
+      credentials: 'same-origin',
+      headers: { 'Accept': 'application/json' }
+    };
+    fetch(url, fetchOpts)
+      .then(function(r) {
+        if (seq !== candlesReqSeq) return null;
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        return r.json();
+      })
+      .then(function(data) {
+        progressiveTailInflight = false;
+        if (data === null) return;
+        if (seq !== candlesReqSeq) return;
+        lastData = data || {};
+        var pm = data.progressive_meta || {};
+        var baseLen = allCandles ? allCandles.length : 0;
+        allCandles = mergeCandlesAppend(allCandles || [], data.candles || []);
+        allStatusChanges = (allStatusChanges || []).concat(
+          offsetIdxList(data.status_changes || [], baseLen)
+        );
+        allTradeMarkers = (allTradeMarkers || []).concat(
+          offsetIdxList(data.trade_markers || [], baseLen)
+        );
+        allStrategyMarkers = (allStrategyMarkers || []).concat(
+          offsetIdxList(data.strategy_markers || [], baseLen)
+        );
+        if (data.bracket_live) allBracketLive = data.bracket_live;
+        progressiveMorePending = !!pm.has_more;
+        progressiveNextChunkIndex =
+          pm.next_chunk_index != null && pm.next_chunk_index !== undefined
+            ? pm.next_chunk_index
+            : chunkIdx + 1;
+        progressiveNextSegmentIndex =
+          pm.next_segment_index != null && pm.next_segment_index !== undefined
+            ? pm.next_segment_index
+            : 0;
+        var maxStart2 = Math.max(0, allCandles.length - VIEW_WINDOW);
+        if (followLiveRightEdge) {
+          windowStart = maxStart2;
+        } else if (windowStart > maxStart2) {
+          windowStart = maxStart2;
+        }
+        renderWindow();
+        if (pm.has_more && pm.next_chunk_index != null && pm.next_segment_index != null) {
+          setTimeout(function() {
+            runProgressiveChain(seq, pm.next_chunk_index, pm.next_segment_index);
+          }, 0);
+        } else {
+          progressiveChainActive = false;
+          progressiveMorePending = false;
+        }
+      })
+      .catch(function(err) {
+        progressiveTailInflight = false;
+        progressiveChainActive = false;
+        if (seq !== candlesReqSeq) return;
+        if (err && err.name === 'AbortError') return;
+        if (meta) {
+          meta.textContent = 'Falha ao carregar trecho — deslize ou clique em Ver.';
+        }
+      });
+  }
+
+  function requestProgressiveTailIfNeeded() {
+    if (!useProgressiveSessionLoad()) return;
+    if (progressiveChainActive) return;
+    if (!progressiveMorePending || progressiveTailInflight) return;
+    if (progressiveLoadSeq !== candlesReqSeq) return;
+    if (!progressiveTailNeedFetch()) return;
+    if (progressiveTailScheduled) return;
+    progressiveTailScheduled = true;
+    if (progressiveTailTimer) {
+      try {
+        clearTimeout(progressiveTailTimer);
+      } catch (eTailT) {}
+      progressiveTailTimer = null;
+    }
+    progressiveTailTimer = setTimeout(function() {
+      progressiveTailTimer = null;
+      progressiveTailScheduled = false;
+      if (!useProgressiveSessionLoad()) return;
+      if (!progressiveMorePending || progressiveTailInflight) return;
+      if (progressiveLoadSeq !== candlesReqSeq) return;
+      if (!progressiveTailNeedFetch()) return;
+
+      progressiveTailInflight = true;
+      var savedSeq = progressiveLoadSeq;
+      var chunkIdx = progressiveNextChunkIndex;
+      var segIdx = progressiveNextSegmentIndex;
+      var url = buildProgressiveFetchUrl(chunkIdx, segIdx);
+      var fetchOpts = {
+        credentials: 'same-origin',
+        headers: { 'Accept': 'application/json' }
+      };
+      if (meta) {
+        meta.textContent =
+          'Carregando trecho ' +
+          String(chunkIdx + 1) +
+          ' · parte ' +
+          String(segIdx + 1) +
+          '…';
+      }
+      fetch(url, fetchOpts)
+        .then(function(r) {
+          if (savedSeq !== progressiveLoadSeq || savedSeq !== candlesReqSeq) return null;
+          if (!r.ok) throw new Error('HTTP ' + r.status);
+          return r.json();
+        })
+        .then(function(data) {
+          progressiveTailInflight = false;
+          if (data === null) return;
+          if (savedSeq !== progressiveLoadSeq || savedSeq !== candlesReqSeq) return;
+          lastData = data || {};
+          var pm = data.progressive_meta || {};
+          var baseLen = allCandles ? allCandles.length : 0;
+          allCandles = mergeCandlesAppend(allCandles || [], data.candles || []);
+          allStatusChanges = (allStatusChanges || []).concat(
+            offsetIdxList(data.status_changes || [], baseLen)
+          );
+          allTradeMarkers = (allTradeMarkers || []).concat(
+            offsetIdxList(data.trade_markers || [], baseLen)
+          );
+          allStrategyMarkers = (allStrategyMarkers || []).concat(
+            offsetIdxList(data.strategy_markers || [], baseLen)
+          );
+          if (data.bracket_live) allBracketLive = data.bracket_live;
+          progressiveMorePending = !!pm.has_more;
+          progressiveNextChunkIndex =
+            pm.next_chunk_index != null && pm.next_chunk_index !== undefined
+              ? pm.next_chunk_index
+              : chunkIdx + 1;
+          progressiveNextSegmentIndex =
+            pm.next_segment_index != null && pm.next_segment_index !== undefined
+              ? pm.next_segment_index
+              : 0;
+          var maxStart2 = Math.max(0, allCandles.length - VIEW_WINDOW);
+          if (followLiveRightEdge) {
+            windowStart = maxStart2;
+          } else if (windowStart > maxStart2) {
+            windowStart = maxStart2;
+          }
+          renderWindow();
+        })
+        .catch(function(err) {
+          progressiveTailInflight = false;
+          if (savedSeq !== candlesReqSeq) return;
+          if (err && err.name === 'AbortError') return;
+          if (meta) {
+            meta.textContent = 'Falha ao carregar trecho — deslize de novo ou clique em Ver.';
+          }
+        });
+    }, PROGRESSIVE_TAIL_DEBOUNCE_MS);
+  }
+
+  function renderWindow() {
+    if (!allCandles || !allCandles.length) return;
+    var maxStart = Math.max(0, allCandles.length - VIEW_WINDOW);
+    if (followLiveRightEdge) {
+      windowStart = maxStart;
+    }
+    if (windowStart > maxStart) windowStart = maxStart;
+    if (windowStart < 0) windowStart = 0;
+
+    if (scrollInput) {
+      scrollInput.max = String(maxStart);
+      var currentRange = parseInt(scrollInput.value || '0', 10);
+      if (!isFinite(currentRange)) currentRange = 0;
+      if (currentRange > maxStart) currentRange = maxStart;
+      // Mantém o range sempre alinhado com a janela efetiva exibida.
+      if (currentRange !== windowStart) scrollInput.value = String(windowStart);
+    }
+
+    var visible = allCandles.slice(windowStart, windowStart + VIEW_WINDOW);
+    var statusWin = (allStatusChanges || []).filter(function(ch) {
+      var idx = Number((ch || {}).idx);
+      return idx >= windowStart && idx < windowStart + VIEW_WINDOW;
+    }).map(function(ch) {
+      return { idx: Number(ch.idx) - windowStart, label: ch.label };
+    });
+    var markerWin = (allTradeMarkers || []).filter(function(m) {
+      var idx = Number((m || {}).idx);
+      return idx >= windowStart && idx < windowStart + VIEW_WINDOW;
+    }).map(function(m) {
+      return {
+        idx: Number(m.idx) - windowStart,
+        side: m.side,
+        quantity: m.quantity,
+        price: m.price
+      };
+    });
+    var strategyWin = (allStrategyMarkers || []).filter(function(m) {
+      var idx = Number((m || {}).idx);
+      return idx >= windowStart && idx < windowStart + VIEW_WINDOW;
+    }).map(function(m) {
+      return {
+        idx: Number(m.idx) - windowStart,
+        strategy_key: m.strategy_key,
+        price: m.price,
+        marker_at: m.marker_at,
+        message: m.message
+      };
+    });
+
+    var chartType = (chartTypeSelect && chartTypeSelect.value) || 'candles';
+    var showSeconds = (Number((lastData && lastData.interval_sec) || 0) || 0) < 60;
+    var vpEnabled = !!(vpEnabledInput && vpEnabledInput.checked);
+    var vpBins = (vpBinsSelect && vpBinsSelect.value) || '24';
+    var vpLabelsEnabled = !!(vpLabelsInput && vpLabelsInput.checked);
+    var vpHistoricalEnabled = !!(vpHistoricalInput && vpHistoricalInput.checked);
+    draw(visible, chartType, statusWin, markerWin, strategyWin, showSeconds, vpEnabled, vpBins, vpLabelsEnabled, vpHistoricalEnabled, allBracketLive, yPanFrac);
+    renderCompactQuote(lastData, visible);
+
+    if (!visible.length) return;
+    var firstIso = visible[0].bucket_start || visible[0].label;
+    var lastIso = visible[visible.length - 1].bucket_start || visible[visible.length - 1].label;
+    try {
+      window.__ENTRADE_CHART_WINDOW_ISO__ = {
+        first_idx: windowStart,
+        last_idx: Math.min(windowStart + visible.length - 1, allCandles.length - 1),
+        first_bucket_start: firstIso != null ? String(firstIso) : '',
+        last_bucket_start: lastIso != null ? String(lastIso) : ''
+      };
+      window.dispatchEvent(new CustomEvent('entrade:chart-window-updated'));
+    } catch (eChartWin) {}
+    var first = formatIsoLocal(firstIso, showSeconds);
+    var last = formatIsoLocal(lastIso, showSeconds);
+
+    var histNote = '';
+    if (!isLiveSessionDropdown() && !isReplayCandles()) {
+      histNote = ' | dia histórico — atualização automática ~8 s';
+    } else if (isLiveSessionDropdown() && candlesPollPaused) {
+      histNote = ' | pregão encerrado — sem atualização automática';
+    }
+    if (useProgressiveSessionLoad() && progressiveMorePending && !progressiveChainActive) {
+      histNote += ' | deslize até o fim da faixa para carregar o próximo trecho';
+    }
+    meta.textContent = 'Ticker ' + ((lastData && lastData.ticker) || '') +
+      ' | intervalo ' + (lastData && lastData.interval_sec ? lastData.interval_sec : '') + 's' +
+      ' | tipo ' + chartType +
+      ' | de ' + first + ' ate ' + last + '.' + histNote;
+
+    if (scrollMeta) {
+      scrollMeta.textContent = 'Mostrando ' + visible.length + ' candles (de ' + (windowStart + 1) + ' a ' + (windowStart + visible.length) + ').';
+    }
+    requestProgressiveTailIfNeeded();
+  }
+
+  function useProgressiveSessionLoad() {
+    if (!sessionDateSelect || !String(sessionDateSelect.value || '').trim()) return false;
+    try {
+      if (window.__ENTRADE_REPLAY_MODE__) return true;
+      if (window.__ENTRADE_AUTOMATION_SIM__ && window.__ENTRADE_AUTOMATION_SIM__.session_date_iso) return true;
+    } catch (eProg) {}
+    return false;
+  }
+  function mergeCandlesAppend(prev, next) {
+    if (!next || !next.length) return prev && prev.length ? prev.slice() : [];
+    if (!prev || !prev.length) return next.slice();
+    var out = prev.slice();
+    var lastBs = String((out[out.length - 1] || {}).bucket_start || '');
+    for (var i = 0; i < next.length; i++) {
+      var c = next[i] || {};
+      var bs = String(c.bucket_start || '');
+      if (!bs) {
+        out.push(c);
+        continue;
+      }
+      if (bs > lastBs) {
+        out.push(c);
+        lastBs = bs;
+      } else if (bs === lastBs) {
+        out[out.length - 1] = c;
+      }
+    }
+    return out;
+  }
+  function offsetIdxList(list, delta) {
+    var d = Number(delta) || 0;
+    return (list || []).map(function(item) {
+      var o = {};
+      for (var k in item) {
+        if (Object.prototype.hasOwnProperty.call(item, k)) o[k] = item[k];
+      }
+      if (item.idx !== undefined && item.idx !== null) o.idx = Number(item.idx) + d;
+      return o;
+    });
+  }
+  function loadProgressiveDay(force, showLoading, seq) {
+    progressiveMorePending = false;
+    progressiveNextChunkIndex = 1;
+    progressiveNextSegmentIndex = 0;
+    progressiveChainActive = false;
+    progressiveTailInflight = false;
+    progressiveTailScheduled = false;
+    if (progressiveTailTimer) {
+      try {
+        clearTimeout(progressiveTailTimer);
+      } catch (eClearP) {}
+      progressiveTailTimer = null;
+    }
+    progressiveLoadSeq = seq;
+
+    var t = (tickerInput.value || '').trim().toUpperCase();
+    var interval = intervalSelect.value || '1m';
+    if (candlesAbort) {
+      try { candlesAbort.abort(); } catch (eAbortP) {}
+    }
+    candlesAbort = typeof AbortController !== 'undefined' ? new AbortController() : null;
+    var fetchOpts = {
+      credentials: 'same-origin',
+      headers: { 'Accept': 'application/json' }
+    };
+    if (candlesAbort) fetchOpts.signal = candlesAbort.signal;
+    inflight = true;
+    meta.textContent = 'Carregando início do dia…';
+    if (showLoading) setChartsLoading(true);
+    var url =
+      endpoint +
+      '?ticker=' +
+      encodeURIComponent(t) +
+      '&interval=' +
+      encodeURIComponent(interval) +
+      '&limit=' +
+      encodeURIComponent(String(PROGRESSIVE_FETCH_LIMIT)) +
+      '&progressive=1&chunk_index=0&segment_index=0&chunk_hours=' +
+      encodeURIComponent(String(PROGRESSIVE_CHUNK_HOURS)) +
+      sessionDateQuery() +
+      replayCandlesQuery();
+    fetch(url, fetchOpts)
+      .then(function(r) {
+        if (seq !== candlesReqSeq) return null;
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        return r.json();
+      })
+      .then(function(data) {
+        if (seq !== candlesReqSeq || data === null) return;
+        lastData = data || {};
+        var pm = data.progressive_meta || {};
+        allCandles = data.candles || [];
+        allStatusChanges = data.status_changes || [];
+        allTradeMarkers = data.trade_markers || [];
+        allStrategyMarkers = data.strategy_markers || [];
+        allBracketLive = data.bracket_live || null;
+        followLiveRightEdge = false;
+        windowStart = 0;
+        progressiveMorePending = !!pm.has_more;
+        progressiveNextChunkIndex =
+          pm.next_chunk_index != null && pm.next_chunk_index !== undefined
+            ? pm.next_chunk_index
+            : 1;
+        progressiveNextSegmentIndex =
+          pm.next_segment_index != null && pm.next_segment_index !== undefined
+            ? pm.next_segment_index
+            : 0;
+        if (shouldPollCandlesChart()) {
+          if (isLiveSessionDropdown() && data.live_poll_active === false) {
+            pauseCandlesPolling();
+          } else if (candlesPollPaused) {
+            candlesPollPaused = false;
+            restartCandlesPolling();
+          }
+        }
+        if (!allCandles.length) {
+          renderCompactQuote(lastData, []);
+          if (progressiveMorePending) {
+            meta.textContent = 'Trecho inicial vazio — buscando próximo…';
+            inflight = false;
+            candlesAbort = null;
+            setChartsLoading(false);
+            if (
+              pm.has_more &&
+              pm.next_chunk_index != null &&
+              pm.next_segment_index != null
+            ) {
+              runProgressiveChain(seq, pm.next_chunk_index, pm.next_segment_index);
+            } else {
+              requestProgressiveTailIfNeeded();
+            }
+            return;
+          }
+          meta.textContent = 'Sem candles para ' + t + ' neste trecho.';
+          inflight = false;
+          candlesAbort = null;
+          setChartsLoading(false);
+          return;
+        }
+        renderWindow();
+        inflight = false;
+        candlesAbort = null;
+        setChartsLoading(false);
+        if (
+          progressiveMorePending &&
+          pm.next_chunk_index != null &&
+          pm.next_segment_index != null
+        ) {
+          runProgressiveChain(seq, pm.next_chunk_index, pm.next_segment_index);
+        }
+      })
+      .catch(function(err) {
+        if (seq !== candlesReqSeq) return;
+        if (err && err.name === 'AbortError') return;
+        renderEmpty('Falha ao carregar candles (progressivo).');
+        meta.textContent = 'Falha ao carregar candles.';
+        inflight = false;
+        candlesAbort = null;
+        setChartsLoading(false);
+      });
+  }
+
+  function load(force, fromPoll) {
+    var t = (tickerInput.value || '').trim().toUpperCase();
+    if (!t) {
+      renderEmpty('Informe um ticker.');
+      meta.textContent = 'Informe um ticker.';
+      return;
+    }
+    if (inflight && !force) return;
+    /**
+     * Overlay só em ações explícitas do usuário (carga inicial, Ver, troca de ticker/intervalo/dia).
+     * Não em poll ao vivo (500 ms) nem em refresh forçado «silencioso» (replay: load(true, true)).
+     * Nota: antes usava !!(force || …), então load(true) sempre mostrava overlay — o replay chamava
+     * load(true) a cada frame; requisições abortadas em sequência nunca batiam seq no finally e o spinner
+     * ficava eterno.
+     */
+    var showLoading = fromPoll !== true;
+    candlesReqSeq += 1;
+    var seq = candlesReqSeq;
+    if (useProgressiveSessionLoad() && !fromPoll) {
+      loadProgressiveDay(force, showLoading, seq);
+      return;
+    }
+    progressiveMorePending = false;
+    progressiveChainActive = false;
+    progressiveNextSegmentIndex = 0;
+    progressiveTailInflight = false;
+    progressiveTailScheduled = false;
+    if (progressiveTailTimer) {
+      try {
+        clearTimeout(progressiveTailTimer);
+      } catch (eClearL) {}
+      progressiveTailTimer = null;
+    }
+    if (candlesAbort) {
+      try { candlesAbort.abort(); } catch (eAbort) {}
+    }
+    candlesAbort = typeof AbortController !== 'undefined' ? new AbortController() : null;
+    var interval = intervalSelect.value || '1m';
+    var chartType = (chartTypeSelect && chartTypeSelect.value) || 'candles';
+    inflight = true;
+    meta.textContent = 'Atualizando...';
+    if (showLoading) setChartsLoading(true);
+    var fetchOpts = {
+      credentials: 'same-origin',
+      headers: { 'Accept': 'application/json' }
+    };
+    if (candlesAbort) fetchOpts.signal = candlesAbort.signal;
+    fetch(endpoint + '?ticker=' + encodeURIComponent(t) + '&interval=' + encodeURIComponent(interval) + '&limit=' + encodeURIComponent(String(FETCH_LIMIT)) + sessionDateQuery() + replayCandlesQuery(), fetchOpts)
+      .then(function(r) {
+        if (seq !== candlesReqSeq) return null;
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        return r.json();
+      })
+      .then(function(data) {
+        if (seq !== candlesReqSeq || data === null) return;
+        lastData = data || {};
+        if (shouldPollCandlesChart()) {
+          /* Só o modo ao vivo deve pausar pelo EndOfDay da API; dia fixo vem live_poll_active=false sempre. */
+          if (isLiveSessionDropdown() && data.live_poll_active === false) {
+            pauseCandlesPolling();
+          } else if (candlesPollPaused) {
+            candlesPollPaused = false;
+            restartCandlesPolling();
+          }
+        }
+        var candles = data.candles || [];
+        allCandles = candles;
+        allStatusChanges = data.status_changes || [];
+        allTradeMarkers = data.trade_markers || [];
+        allStrategyMarkers = data.strategy_markers || [];
+        allBracketLive = data.bracket_live || null;
+
+        if (!candles.length) {
+          renderCompactQuote(lastData, candles);
+          var emptyMsg = 'Sem candles para ' + t + ' (' + interval + ').';
+          if (isLiveSessionDropdown() && lastData.live_poll_active === false) {
+            emptyMsg += ' Pregão encerrado — atualização automática pausada.';
+          }
+          meta.textContent = emptyMsg;
+          return;
+        }
+
+        var maxStart = Math.max(0, candles.length - VIEW_WINDOW);
+        if (scrollInput && !followLiveRightEdge) {
+          var v = parseInt(scrollInput.value || '0', 10);
+          if (!isFinite(v)) v = maxStart;
+          windowStart = Math.min(v, maxStart);
+        } else {
+          windowStart = maxStart;
+        }
+
+        renderWindow();
+      })
+      .catch(function(err) {
+        if (seq !== candlesReqSeq) return;
+        if (err && err.name === 'AbortError') return;
+        renderEmpty('Falha ao carregar candles.');
+        meta.textContent = 'Falha ao carregar candles.';
+      })
+      .finally(function() {
+        if (seq === candlesReqSeq) {
+          inflight = false;
+          candlesAbort = null;
+          setChartsLoading(false);
+        }
+      });
+  }
+
+  refreshBtn.addEventListener('click', function() {
+    followLiveRightEdge = true;
+    load(true);
+    restartCandlesPolling();
+  });
+  intervalSelect.addEventListener('change', function() {
+    candlesPollPaused = false;
+    load(true);
+    restartCandlesPolling();
+  });
+  if (tickerInput) {
+    tickerInput.addEventListener('change', function() {
+      fetchSessionDates(function() {
+        followLiveRightEdge = true;
+        candlesPollPaused = false;
+        load(true);
+        restartCandlesPolling();
+      });
+    });
+  }
+  if (sessionDateSelect) {
+    sessionDateSelect.addEventListener('change', function() {
+      followLiveRightEdge = true;
+      candlesPollPaused = false;
+      load(true);
+      restartCandlesPolling();
+    });
+  }
+  if (scrollInput) {
+    scrollInput.addEventListener('input', function() {
+      var v = parseInt(scrollInput.value || '0', 10);
+      if (!isFinite(v)) v = 0;
+      windowStart = v;
+      var maxStart = Math.max(0, (allCandles ? allCandles.length : 0) - VIEW_WINDOW);
+      // Tolerância de 1 posição para retomar auto-follow mesmo com pequenas diferenças.
+      followLiveRightEdge = (v >= (maxStart - 1));
+      renderWindow();
+    });
+  }
+  if (chartTypeSelect) {
+    chartTypeSelect.addEventListener('change', function() {
+      if (allCandles && allCandles.length) renderWindow();
+      else load(true);
+    });
+  }
+  if (vpEnabledInput) {
+    vpEnabledInput.addEventListener('change', function() {
+      if (allCandles && allCandles.length) renderWindow();
+    });
+  }
+  if (vpBinsSelect) {
+    vpBinsSelect.addEventListener('change', function() {
+      if (allCandles && allCandles.length) renderWindow();
+    });
+  }
+  if (vpLabelsInput) {
+    vpLabelsInput.addEventListener('change', function() {
+      if (allCandles && allCandles.length) renderWindow();
+    });
+  }
+  if (vpHistoricalInput) {
+    vpHistoricalInput.addEventListener('change', function() {
+      if (allCandles && allCandles.length) renderWindow();
+    });
+  }
+  function beginYPan(ev) {
+    if (!allCandles || !allCandles.length) return;
+    dragYActive = true;
+    dragYStartClient = Number(ev.clientY || 0);
+    dragYStartPan = yPanFrac;
+    svg.style.cursor = 'grabbing';
+  }
+  function beginXPan(ev) {
+    if (!allCandles || !allCandles.length) return;
+    dragXActive = true;
+    dragXStartClient = Number(ev.clientX || 0);
+    dragXStartWindow = windowStart;
+    svg.style.cursor = 'grabbing';
+  }
+  function moveXPan(ev) {
+    if (!dragXActive) return;
+    var maxStart = Math.max(0, (allCandles ? allCandles.length : 0) - VIEW_WINDOW);
+    if (maxStart <= 0) return;
+    var wNow = Math.max(320, Number(svg && svg.clientWidth) || 960);
+    var dx = Number(ev.clientX || 0) - dragXStartClient;
+    var candlesPerPixel = VIEW_WINDOW / Math.max(160, wNow - 56);
+    var deltaCandles = Math.round(-dx * candlesPerPixel);
+    windowStart = Math.max(0, Math.min(maxStart, dragXStartWindow + deltaCandles));
+    followLiveRightEdge = (windowStart >= (maxStart - 1));
+    renderWindow();
+  }
+  function endXPan() {
+    if (!dragXActive) return;
+    dragXActive = false;
+    svg.style.cursor = 'grab';
+  }
+  function moveYPan(ev) {
+    if (!dragYActive) return;
+    var hNow = Math.max(200, Number(svg && svg.clientHeight) || 280);
+    var dy = Number(ev.clientY || 0) - dragYStartClient;
+    var delta = dy / Math.max(120, (hNow - 56));
+    yPanFrac = Math.max(-1, Math.min(1, dragYStartPan + delta));
+    renderWindow();
+  }
+  function endYPan() {
+    if (!dragYActive) return;
+    dragYActive = false;
+    svg.style.cursor = 'grab';
+  }
+  if (svg) {
+    svg.style.cursor = 'grab';
+    svg.addEventListener('mousedown', function(ev) {
+      if (ev.button !== 0) return;
+      if (ev.shiftKey) beginYPan(ev);
+      else beginXPan(ev);
+      ev.preventDefault();
+    });
+    window.addEventListener('mousemove', function(ev) {
+      moveXPan(ev);
+      moveYPan(ev);
+    });
+    window.addEventListener('mouseup', function() {
+      endXPan();
+      endYPan();
+    });
+    svg.addEventListener('mouseleave', function() {
+      if (!dragYActive && !dragXActive) svg.style.cursor = 'grab';
+    });
+  }
+  function pauseCandlesPolling() {
+    candlesPollPaused = true;
+    try {
+      window.__ENTRADE_LIVE_CHART_POLL_PAUSED__ = true;
+    } catch (ePollP) {}
+    if (pollTimer) {
+      clearInterval(pollTimer);
+      pollTimer = null;
+    }
+  }
+
+  // Poll de candles (pausa em background) — alternar tipo continua instantâneo.
+  function restartCandlesPolling() {
+    candlesPollPaused = false;
+    try {
+      window.__ENTRADE_LIVE_CHART_POLL_PAUSED__ = false;
+    } catch (ePollR) {}
+    if (pollTimer) {
+      clearInterval(pollTimer);
+      pollTimer = null;
+    }
+    startCandlesPolling();
+  }
+
+  function startCandlesPolling() {
+    if (pollTimer) {
+      clearInterval(pollTimer);
+      pollTimer = null;
+    }
+    if (candlesPollPaused) return;
+    if (!shouldPollCandlesChart()) return;
+    var tickMs = candlesPollIntervalMs();
+    pollTimer = setInterval(function() {
+      if (document.visibilityState !== 'visible') return;
+      if (candlesPollPaused) return;
+      if (!shouldPollCandlesChart()) return;
+      load(false, true);
+    }, tickMs);
+  }
+
+  window.__ENTRADE_CANDLES_RELOAD__ = function() {
+    load(true, true);
+  };
+
+  if (!applyAutomationSimBootstrap()) {
+    load();
+  }
+  startCandlesPolling();
+  fetchSessionDates(function() {
+    /* Só preenche o select de dias; candles não devem esperar este fetch (evita gráfico preso). */
+  });
+
+  document.addEventListener('visibilitychange', function() {
+    if (document.visibilityState !== 'visible') return;
+    if (!isLiveSessionDropdown() || !candlesPollPaused) return;
+    load(true);
+  });
+
+  window.addEventListener('resize', function() {
+    if (resizeTimer) clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(function() {
+      if (allCandles && allCandles.length) renderWindow();
+    }, 120);
+  });
+})();
+</script>

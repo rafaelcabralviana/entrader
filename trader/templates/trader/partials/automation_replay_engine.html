@@ -1,0 +1,33 @@
+{# Barra de replay — o JS fica em automation_replay_script.html (extra_js, após candles). #}
+<div id="automation-replay-bar" class="automation-replay-bar" aria-label="Replay do pregão">
+  <div class="automation-replay-row">
+    <strong>Replay do dia</strong>
+    <span id="automation-replay-status" class="hint">Aguardando…</span>
+  </div>
+  <div class="automation-replay-controls">
+    <button type="button" class="submit" id="automation-replay-play" disabled>Play</button>
+    <button type="button" class="btn-secondary" id="automation-replay-pause" disabled>Pausa</button>
+    <button type="button" class="btn-secondary" id="automation-replay-reset">Início</button>
+    <label class="automation-replay-speed">Velocidade
+      <select id="automation-replay-speed">
+        <option value="0.25">0,25×</option>
+        <option value="0.5">0,5×</option>
+        <option value="1" selected>1×</option>
+        <option value="2">2×</option>
+        <option value="4">4×</option>
+        <option value="8">8×</option>
+        <option value="12">12×</option>
+        <option value="16">16×</option>
+        <option value="24">24×</option>
+        <option value="32">32×</option>
+      </select>
+    </label>
+  </div>
+  <div class="automation-replay-progress-wrap">
+    <input type="range" id="automation-replay-scrub" min="0" max="0" value="0" disabled style="width:100%;max-width:36rem;">
+    <div class="automation-replay-time">
+      <span id="automation-replay-time-label">—</span>
+      <span id="automation-replay-frame-count" class="hint"></span>
+    </div>
+  </div>
+</div>

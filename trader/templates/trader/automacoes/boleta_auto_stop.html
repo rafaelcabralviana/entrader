@@ -1,0 +1,408 @@
+{# Automação: preenche referência, disparo e limite na boleta (#boleta). Incluído em sidebar_boleta. #}
+<style>
+  .as-autostop-bar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.35rem 0.6rem;
+    margin: 0 0 0.65rem;
+    padding: 0.35rem 0.5rem;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: rgba(148, 163, 184, 0.06);
+    font-size: 0.82rem;
+  }
+  .as-autostop-flag { display: inline-flex; align-items: center; gap: 0.25rem; margin: 0; cursor: pointer; user-select: none; }
+  .as-autostop-flag input { max-width: none; }
+  .as-autostop-cfg {
+    padding: 0.12rem 0.45rem;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    background: var(--bg);
+    color: var(--fg);
+    cursor: pointer;
+    font-size: 0.85rem;
+    line-height: 1.2;
+  }
+  .as-autostop-cfg:hover { border-color: var(--nav-active); }
+  .as-autostop-msg { flex: 1 1 8rem; margin: 0; min-height: 1.1em; }
+  .as-autostop-live {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.25rem;
+    margin: 0;
+    cursor: pointer;
+    user-select: none;
+    font-size: 0.78rem;
+    color: var(--muted);
+  }
+  .as-autostop-live input { max-width: none; }
+  .as-modal-backdrop {
+    display: none;
+    position: fixed;
+    inset: 0;
+    z-index: 1200;
+    background: rgba(15, 23, 42, 0.45);
+    align-items: center;
+    justify-content: center;
+    padding: 1rem;
+  }
+  .as-modal-backdrop.is-open { display: flex; }
+  .as-modal-card {
+    width: 100%;
+    max-width: 22rem;
+    border-radius: 10px;
+    border: 1px solid var(--border);
+    background: var(--nav-bg);
+    box-shadow: var(--shadow);
+    max-height: 90vh;
+    overflow: auto;
+  }
+  .as-modal-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0.55rem 0.75rem;
+    border-bottom: 1px solid var(--border);
+  }
+  .as-modal-head h3 { margin: 0; font-size: 0.95rem; }
+  .as-modal-close {
+    border: none;
+    background: transparent;
+    font-size: 1.35rem;
+    line-height: 1;
+    cursor: pointer;
+    color: var(--muted);
+  }
+  .as-modal-body { padding: 0.65rem 0.75rem 0.85rem; }
+  .as-modal-body label { display: grid; gap: 0.2rem; margin-bottom: 0.55rem; font-size: 0.82rem; }
+  .as-modal-body input, .as-modal-body select {
+    padding: 0.35rem 0.45rem;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    background: var(--bg);
+    color: var(--fg);
+    max-width: 100%;
+  }
+  .as-modal-actions { display: flex; gap: 0.4rem; justify-content: flex-end; margin-top: 0.35rem; }
+  .as-modal-actions button {
+    padding: 0.35rem 0.65rem;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    background: var(--bg);
+    cursor: pointer;
+    font-size: 0.82rem;
+  }
+  .as-modal-actions button.as-primary {
+    border: none;
+    background: var(--nav-active);
+    color: #fff;
+    font-weight: 600;
+  }
+</style>
+
+<div class="as-autostop-bar" id="as-autostop-root">
+  <label class="as-autostop-flag" title="Com tipo Stop limit, preenche disparo e limite a partir do mercado (snapshot local).">
+    <input type="checkbox" id="as-autostop-enabled" autocomplete="off">
+    <span>Auto stop</span>
+  </label>
+  <label class="as-autostop-live" title="Atualiza cotação de referência, campo Preço e stops cerca de 1× por segundo.">
+    <input type="checkbox" id="as-autostop-live" autocomplete="off" checked>
+    <span>Mercado ao vivo</span>
+  </label>
+  <button type="button" class="as-autostop-cfg" id="as-autostop-open" title="Percentual e preço de referência">⚙</button>
+  <span class="hint as-autostop-msg" id="as-autostop-msg" aria-live="polite"></span>
+</div>
+
+<div class="as-modal-backdrop" id="as-autostop-modal" aria-hidden="true">
+  <div class="as-modal-card" role="dialog" aria-modal="true" aria-labelledby="as-autostop-title">
+    <div class="as-modal-head">
+      <h3 id="as-autostop-title">Auto stop (stop limit)</h3>
+      <button type="button" class="as-modal-close" id="as-autostop-close" aria-label="Fechar">×</button>
+    </div>
+    <div class="as-modal-body">
+      <p class="hint" style="margin:0 0 0.5rem;font-size:0.78rem;">
+        Compra: disparo <strong>acima</strong> da referência. Venda: disparo <strong>abaixo</strong>.
+        Usa o mesmo snapshot de cotação/livro que o painel (local).
+        Com <strong>Mercado ao vivo</strong>, o campo <em>Preço (referência)</em> acompanha essa cotação (~1/s) e os stops recalculam.
+      </p>
+      <label>
+        % em relação à referência (disparo)
+        <input type="number" id="as-modal-pct" min="0" max="100" step="0.05" value="0.5">
+      </label>
+      <label>
+        Preço de referência
+        <select id="as-modal-basis">
+          <option value="last">Último negócio</option>
+          <option value="bid">Melhor compra</option>
+          <option value="ask">Melhor venda</option>
+          <option value="mid">Meio (bid/ask)</option>
+        </select>
+      </label>
+      <label title="Diferença extra entre disparo e preço limitado (0 = iguais).">
+        % extra na ordem limitada vs. disparo
+        <input type="number" id="as-modal-ord-delta" min="0" max="100" step="0.02" value="0">
+      </label>
+      <div class="as-modal-actions">
+        <button type="button" id="as-autostop-dismiss">Fechar</button>
+        <button type="button" class="as-primary" id="as-autostop-apply">Salvar e aplicar</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+(function() {
+  var LS = {
+    en: 'trader.automacoes.auto_stop.enabled',
+    live: 'trader.automacoes.auto_stop.live',
+    pct: 'trader.automacoes.auto_stop.pct',
+    basis: 'trader.automacoes.auto_stop.basis',
+    od: 'trader.automacoes.auto_stop.order_delta_pct'
+  };
+  var SUGGEST = "{% url 'trader:boleta_auto_stop_suggest' %}";
+  var POLL_MS = 1000;
+
+  var rootBoleta = document.getElementById('boleta');
+  function qsBoleta(id) {
+    if (!id) return null;
+    var sel = '#' + id.replace(/#/g, '');
+    if (rootBoleta) return rootBoleta.querySelector(sel);
+    return document.getElementById(id);
+  }
+
+  var chk = document.getElementById('as-autostop-enabled');
+  var chkLive = document.getElementById('as-autostop-live');
+  var msg = document.getElementById('as-autostop-msg');
+  var modal = document.getElementById('as-autostop-modal');
+  var openBtn = document.getElementById('as-autostop-open');
+  var closeBtn = document.getElementById('as-autostop-close');
+  var dismissBtn = document.getElementById('as-autostop-dismiss');
+  var applyBtn = document.getElementById('as-autostop-apply');
+  var inpPct = document.getElementById('as-modal-pct');
+  var inpBasis = document.getElementById('as-modal-basis');
+  var inpOd = document.getElementById('as-modal-ord-delta');
+  if (!chk || !modal) return;
+
+  var liveTimer = null;
+
+  function readLs(key, fallback) {
+    try {
+      var v = localStorage.getItem(key);
+      return v != null && v !== '' ? v : fallback;
+    } catch (e) { return fallback; }
+  }
+  function writeLs(key, val) {
+    try { localStorage.setItem(key, val); } catch (e) {}
+  }
+
+  function loadSettings() {
+    chk.checked = readLs(LS.en, '') === '1';
+    if (chkLive) chkLive.checked = readLs(LS.live, '1') === '1';
+    inpPct.value = readLs(LS.pct, '0.5');
+    inpBasis.value = readLs(LS.basis, 'last');
+    inpOd.value = readLs(LS.od, '0');
+  }
+  function saveSettings() {
+    writeLs(LS.en, chk.checked ? '1' : '0');
+    if (chkLive) writeLs(LS.live, chkLive.checked ? '1' : '0');
+    writeLs(LS.pct, String(inpPct.value || '0.5'));
+    writeLs(LS.basis, String(inpBasis.value || 'last'));
+    writeLs(LS.od, String(inpOd.value || '0'));
+  }
+
+  function boletaTicker() {
+    var b = qsBoleta('boleta-order-ticker');
+    if (b && b.value) return String(b.value).trim().toUpperCase();
+    var m = document.querySelector('.mp-form input[name="ticker"]');
+    if (m && m.value) return String(m.value).trim().toUpperCase();
+    var q = new URLSearchParams(window.location.search).get('ticker');
+    return (q || '').trim().toUpperCase();
+  }
+  function boletaSide() {
+    var s = qsBoleta('boleta-side');
+    return s && s.value ? s.value : 'Buy';
+  }
+  function orderType() {
+    var t = qsBoleta('boleta-order-type');
+    return t && t.value ? String(t.value).trim() : '';
+  }
+
+  function updateStopLegend() {
+    var el = qsBoleta('boleta-stop-legend');
+    if (!el) return;
+    if (orderType() !== 'stop-limit') {
+      el.hidden = true;
+      el.textContent = '';
+      return;
+    }
+    el.hidden = false;
+    if (boletaSide() === 'Sell') {
+      el.textContent =
+        'Venda stop limit: o disparo fica abaixo da cotação de referência — uso típico: encerrar posição comprada se o preço cair (stop de perda) ou vender em rompimento de suporte.';
+    } else {
+      el.textContent =
+        'Compra stop limit: o disparo fica acima da cotação — a ordem só entra se o preço subir até esse nível (ex.: rompimento). Não equivale a “stop de perda” para quem já está comprado; para isso use Venda stop limit com disparo abaixo.';
+    }
+  }
+
+  function clearLiveTimer() {
+    if (liveTimer) {
+      clearInterval(liveTimer);
+      liveTimer = null;
+    }
+  }
+
+  function scheduleLiveTimer() {
+    clearLiveTimer();
+    if (!chk.checked || !chkLive || !chkLive.checked) return;
+    if (orderType() !== 'stop-limit') return;
+    liveTimer = setInterval(function() {
+      applyAutoStop(true);
+    }, POLL_MS);
+  }
+
+  function setMsg(text, isErr) {
+    if (!msg) return;
+    msg.textContent = text || '';
+    msg.style.color = isErr ? '#b3261e' : '';
+  }
+
+  function applyAutoStop(fromTimer) {
+    if (!chk.checked) {
+      clearLiveTimer();
+      return;
+    }
+    updateStopLegend();
+    if (orderType() !== 'stop-limit') {
+      setMsg('Selecione tipo Stop limit na boleta.', false);
+      clearLiveTimer();
+      return;
+    }
+    var st = qsBoleta('boleta-stop-trigger');
+    var so = qsBoleta('boleta-stop-order');
+    var pr = qsBoleta('boleta-price');
+    if (!st || !so) {
+      setMsg('Boleta não visível nesta página — configuração salva.', false);
+      clearLiveTimer();
+      return;
+    }
+    var sym = boletaTicker();
+    if (!sym) {
+      setMsg('Informe o ticker na boleta.', true);
+      clearLiveTimer();
+      return;
+    }
+    var u = new URL(SUGGEST, window.location.origin);
+    u.searchParams.set('ticker', sym);
+    u.searchParams.set('side', boletaSide());
+    u.searchParams.set('pct', String(inpPct.value || '0.5'));
+    u.searchParams.set('basis', String(inpBasis.value || 'last'));
+    u.searchParams.set('order_delta_pct', String(inpOd.value || '0'));
+
+    fetch(u.toString(), { credentials: 'same-origin', headers: { 'Accept': 'application/json' } })
+      .then(function(r) {
+        if (r.status === 401 || r.status === 403) throw new Error('Sessão');
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        return r.json();
+      })
+      .then(function(d) {
+        if (!d || !d.ok) {
+          setMsg((d && d.error) ? d.error : 'Sem dados.', true);
+          return;
+        }
+        st.value = d.stop_trigger;
+        so.value = d.stop_order;
+        if (pr && d.ref_price != null && d.ref_price !== '') pr.value = d.ref_price;
+        var tick = (d.ticker || sym || '').toUpperCase();
+        var liveHint = chkLive && chkLive.checked ? ' · ao vivo ~' + (POLL_MS / 1000) + 's' : '';
+        setMsg(tick + ' @ ' + (d.ref_label || 'ref') + ' ' + (d.ref_price || '') + ' → disparo ' + (d.stop_trigger || '') + ' / limite ' + (d.stop_order || '') + liveHint, false);
+      })
+      .catch(function() {
+        if (!fromTimer) setMsg('Falha ao calcular stop.', true);
+      })
+      .finally(function() {
+        updateStopLegend();
+      });
+  }
+
+  function openModal() {
+    loadSettings();
+    modal.classList.add('is-open');
+    modal.setAttribute('aria-hidden', 'false');
+  }
+  function closeModal() {
+    modal.classList.remove('is-open');
+    modal.setAttribute('aria-hidden', 'true');
+  }
+
+  loadSettings();
+  updateStopLegend();
+
+  chk.addEventListener('change', function() {
+    saveSettings();
+    if (chk.checked) {
+      applyAutoStop(false);
+      scheduleLiveTimer();
+    } else {
+      setMsg('', false);
+      clearLiveTimer();
+    }
+  });
+  if (chkLive) {
+    chkLive.addEventListener('change', function() {
+      saveSettings();
+      if (chk.checked) {
+        applyAutoStop(false);
+        scheduleLiveTimer();
+      }
+    });
+  }
+  if (openBtn) openBtn.addEventListener('click', openModal);
+  if (closeBtn) closeBtn.addEventListener('click', closeModal);
+  if (dismissBtn) dismissBtn.addEventListener('click', closeModal);
+  modal.addEventListener('click', function(ev) { if (ev.target === modal) closeModal(); });
+  document.addEventListener('keydown', function(ev) {
+    if (ev.key === 'Escape' && modal.classList.contains('is-open')) closeModal();
+  });
+  if (applyBtn) applyBtn.addEventListener('click', function() {
+    saveSettings();
+    closeModal();
+    applyAutoStop(false);
+    scheduleLiveTimer();
+  });
+
+  ['boleta-order-type', 'boleta-side', 'boleta-order-ticker'].forEach(function(id) {
+    var el = qsBoleta(id);
+    if (el) {
+      el.addEventListener('change', function() {
+        updateStopLegend();
+        if (chk.checked) {
+          applyAutoStop(false);
+          scheduleLiveTimer();
+        }
+      });
+      el.addEventListener('input', function() {
+        updateStopLegend();
+        if (chk.checked) applyAutoStop(false);
+      });
+    }
+  });
+
+  if (chk.checked) {
+    applyAutoStop(false);
+    scheduleLiveTimer();
+  }
+
+  document.addEventListener('visibilitychange', function() {
+    if (document.hidden) {
+      clearLiveTimer();
+    } else if (chk.checked) {
+      applyAutoStop(false);
+      scheduleLiveTimer();
+    }
+  });
+})();
+});
+</script>

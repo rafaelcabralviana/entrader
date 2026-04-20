@@ -1,0 +1,230 @@
+<script>
+(function() {
+  var FRAG = "{% url 'trader:orders_panel_fragment' %}";
+  if (window.location.pathname === '/') FRAG += '?home=1';
+  function getCookie(name) {
+    var m = document.cookie.match(new RegExp('(^| )' + name + '=([^;]+)'));
+    return m ? decodeURIComponent(m[2]) : '';
+  }
+  function qs(el, sel) { return el.querySelector(sel); }
+  var form = document.querySelector('form.sidebar-boleta-form');
+  if (!form) return;
+  var defaultBoletaSubmitLabel = (function() {
+    var b = form.querySelector('button.sidebar-boleta-submit');
+    var t = b && b.textContent ? String(b.textContent).trim() : '';
+    return t || 'Enviar ordem';
+  })();
+  var boletaSubmitInFlight = false;
+  var setupSelect = qs(form, '#boleta-setup-status');
+  var noSetupInput = qs(form, '#boleta-no-setup');
+
+  function syncSetupControls() {
+    if (!setupSelect || !noSetupInput) return;
+    /* Não usar disabled no select: campos desabilitados não vão no POST e o valor vira outro (ex.: filled). */
+    setupSelect.style.opacity = noSetupInput.checked ? '0.65' : '';
+    setupSelect.title = noSetupInput.checked ? 'Simulação (setup) ignorada quando "Enviar sem preencher" está marcado.' : '';
+  }
+  if (noSetupInput) {
+    noSetupInput.addEventListener('change', syncSetupControls);
+    syncSetupControls();
+  }
+
+  function refreshOrdersPanel() {
+    var el = document.getElementById('orders-live-inner');
+    if (!el) return;
+    fetch(FRAG, { credentials: 'same-origin', headers: { 'Accept': 'text/html' } })
+      .then(function(r) {
+        if (!r.ok) throw new Error('fragment');
+        return r.text();
+      })
+      .then(function(html) {
+        el.innerHTML = html;
+      })
+      .catch(function() {});
+  }
+
+  function refreshFinanceAfterOrder() {
+    if (typeof window.refreshFinanceStrip === 'function') {
+      window.refreshFinanceStrip();
+    }
+  }
+
+  function applyOrdersHtml(html) {
+    var el = document.getElementById('orders-live-inner');
+    if (el && html) el.innerHTML = html;
+  }
+
+  function setBoletaMsg(text, isErr) {
+    var id = 'boleta-ajax-msg';
+    var p = document.getElementById(id);
+    if (!p) {
+      p = document.createElement('p');
+      p.id = id;
+      p.className = 'sidebar-boleta-msg sidebar-text';
+      form.parentNode.insertBefore(p, form.nextSibling);
+    }
+    p.className = 'sidebar-boleta-msg sidebar-text' + (isErr ? ' sidebar-boleta-msg--err' : '');
+    p.textContent = text;
+    p.style.display = '';
+    if (!isErr) {
+      setTimeout(function() { p.style.display = 'none'; }, 5000);
+    }
+  }
+
+  function setOrdersMsg(text, isErr) {
+    var id = 'orders-ajax-msg';
+    var host = document.getElementById('orders-live-inner');
+    if (!host) return;
+    var p = document.getElementById(id);
+    if (!p) {
+      p = document.createElement('p');
+      p.id = id;
+      p.className = 'sidebar-text';
+      host.parentNode.insertBefore(p, host);
+    }
+    p.className = 'sidebar-text' + (isErr ? ' sidebar-boleta-msg--err' : '');
+    p.textContent = text;
+    p.style.display = '';
+    if (!isErr) {
+      setTimeout(function() { p.style.display = 'none'; }, 5000);
+    }
+  }
+
+  function resolveBoletaSubmitButton(ev) {
+    var sub = ev && ev.submitter;
+    if (sub && sub.form === form && String(sub.type || '').toLowerCase() === 'submit') {
+      return sub;
+    }
+    return form.querySelector('button.sidebar-boleta-submit') || form.querySelector('[type="submit"]');
+  }
+
+  function resetBoletaSubmitButton(prevDisabled, prevText) {
+    var btn = form.querySelector('button.sidebar-boleta-submit') || form.querySelector('[type="submit"]');
+    if (!btn) return;
+    btn.disabled = !!prevDisabled;
+    btn.textContent = (prevText != null && String(prevText).trim() !== '') ? prevText : defaultBoletaSubmitLabel;
+  }
+
+  form.addEventListener('submit', function(ev) {
+    ev.preventDefault();
+    if (boletaSubmitInFlight) return;
+    var submitBtn = resolveBoletaSubmitButton(ev);
+    var prevDisabled = submitBtn ? submitBtn.disabled : false;
+    var prevText = submitBtn ? submitBtn.textContent : '';
+    boletaSubmitInFlight = true;
+    if (submitBtn) {
+      submitBtn.disabled = true;
+      submitBtn.textContent = 'Enviando…';
+    }
+    var token = getCookie('csrftoken') || (qs(form, '[name=csrfmiddlewaretoken]') || {}).value;
+    var fd = new FormData(form);
+    var action = form.getAttribute('action') || window.location.pathname;
+    fetch(action, {
+      method: 'POST',
+      body: fd,
+      credentials: 'same-origin',
+      headers: {
+        'X-Requested-With': 'XMLHttpRequest',
+        'X-CSRFToken': token || ''
+      }
+    })
+      .then(function(r) {
+        return r.json().then(function(data) {
+          return { httpOk: r.ok, data: data };
+        }).catch(function() {
+          return { httpOk: false, data: null };
+        });
+      })
+      .then(function(o) {
+        if (!o.data) {
+          setBoletaMsg('Resposta inválida do servidor.', true);
+          return;
+        }
+        if (!o.httpOk || o.data.ok === false) {
+          setBoletaMsg(o.data.error || 'Não foi possível enviar a ordem.', true);
+          return;
+        }
+        if (o.data.ok === true) {
+          setBoletaMsg('Ordem enviada — lista de ordens do dia atualizada.', false);
+          if (o.data.orders_html) {
+            applyOrdersHtml(o.data.orders_html);
+          } else {
+            refreshOrdersPanel();
+          }
+          refreshFinanceAfterOrder();
+          var det = document.querySelector('#boleta .sidebar-boleta-details');
+          if (det) det.style.display = 'none';
+          return;
+        }
+        setBoletaMsg('Resposta inesperada.', true);
+      })
+      .catch(function() {
+        setBoletaMsg('Erro de rede.', true);
+      })
+      .finally(function() {
+        boletaSubmitInFlight = false;
+        resetBoletaSubmitButton(prevDisabled, prevText);
+      });
+  });
+
+  document.addEventListener('submit', function(ev) {
+    var cancelForm = ev.target;
+    if (!cancelForm || !cancelForm.matches('form.form-cancel-order')) return;
+    ev.preventDefault();
+    if (!window.confirm('Cancelar esta ordem?')) return;
+    var submitBtn = cancelForm.querySelector('[type="submit"]');
+    var prevDisabled = submitBtn ? submitBtn.disabled : false;
+    var prevText = submitBtn ? submitBtn.textContent : '';
+    if (submitBtn) {
+      submitBtn.disabled = true;
+      submitBtn.textContent = 'Cancelando...';
+    }
+    var token = getCookie('csrftoken') || (qs(cancelForm, '[name=csrfmiddlewaretoken]') || {}).value;
+    var fd = new FormData(cancelForm);
+    fetch(cancelForm.getAttribute('action') || window.location.pathname, {
+      method: 'POST',
+      body: fd,
+      credentials: 'same-origin',
+      headers: {
+        'X-Requested-With': 'XMLHttpRequest',
+        'X-CSRFToken': token || ''
+      }
+    })
+      .then(function(r) {
+        return r.json().then(function(data) {
+          return { httpOk: r.ok, data: data };
+        }).catch(function() {
+          return { httpOk: false, data: null };
+        });
+      })
+      .then(function(o) {
+        if (!o.data) {
+          setOrdersMsg('Resposta inválida do servidor no cancelamento.', true);
+          return;
+        }
+        if (!o.httpOk || o.data.ok === false) {
+          setOrdersMsg(o.data.error || 'Não foi possível cancelar a ordem.', true);
+          return;
+        }
+        if (o.data.ok === true) {
+          setOrdersMsg(o.data.message || 'Cancelamento solicitado.', false);
+          if (o.data.orders_html) {
+            applyOrdersHtml(o.data.orders_html);
+          } else {
+            refreshOrdersPanel();
+          }
+          refreshFinanceAfterOrder();
+        }
+      })
+      .catch(function() {
+        setOrdersMsg('Erro de rede no cancelamento.', true);
+      })
+      .finally(function() {
+        if (submitBtn) {
+          submitBtn.disabled = prevDisabled;
+          submitBtn.textContent = prevText;
+        }
+      });
+  });
+})();
+</script>

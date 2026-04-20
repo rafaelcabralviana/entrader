@@ -1,0 +1,9 @@
+Django==6.0.4
+psycopg[binary]>=3.2,<4
+gunicorn>=22,<24
+requests==2.32.3
+cryptography>=45.0.7,<47
+python-dotenv==1.0.1
+websocket-client==1.8.0
+celery==5.6.3
+redis>=4.5,<7

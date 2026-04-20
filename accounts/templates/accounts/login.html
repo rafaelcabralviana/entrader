@@ -1,0 +1,141 @@
+{% load site_extras %}
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex, nofollow">
+  <title>{% site_brand_name %} — Acesso</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #0b1120;
+      --fg: #f1f5f9;
+      --muted: #94a3b8;
+      --border: #1e293b;
+      --accent: #3b82f6;
+      --err: #f87171;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+      background: radial-gradient(ellipse 120% 80% at 50% -20%, rgba(59, 130, 246, 0.12), transparent),
+        var(--bg);
+      color: var(--fg);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 1.25rem;
+    }
+    .card {
+      width: 100%;
+      max-width: 22rem;
+      background: rgba(15, 23, 42, 0.85);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 1.75rem 1.5rem 1.5rem;
+      box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.45);
+    }
+    .card h1 {
+      margin: 0 0 0.35rem;
+      font-size: 1.15rem;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+    }
+    .card .sub {
+      margin: 0 0 1.35rem;
+      font-size: 0.88rem;
+      color: var(--muted);
+      line-height: 1.45;
+    }
+    label {
+      display: block;
+      font-size: 0.82rem;
+      font-weight: 500;
+      color: var(--muted);
+      margin-bottom: 0.35rem;
+    }
+    input[type="text"],
+    input[type="password"] {
+      width: 100%;
+      padding: 0.55rem 0.65rem;
+      border-radius: 10px;
+      border: 1px solid var(--border);
+      background: #020617;
+      color: var(--fg);
+      font-size: 1rem;
+      margin-bottom: 1rem;
+    }
+    input:focus {
+      outline: none;
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.2);
+    }
+    button[type="submit"] {
+      width: 100%;
+      margin-top: 0.25rem;
+      padding: 0.6rem 1rem;
+      border: none;
+      border-radius: 10px;
+      background: var(--accent);
+      color: #fff;
+      font-weight: 600;
+      font-size: 0.95rem;
+      cursor: pointer;
+    }
+    button[type="submit"]:hover { filter: brightness(1.08); }
+    .err {
+      background: rgba(248, 113, 113, 0.1);
+      border: 1px solid rgba(248, 113, 113, 0.35);
+      color: var(--err);
+      font-size: 0.85rem;
+      padding: 0.55rem 0.65rem;
+      border-radius: 10px;
+      margin-bottom: 1rem;
+    }
+    .field-err {
+      color: var(--err);
+      font-size: 0.8rem;
+      margin: -0.75rem 0 0.75rem;
+    }
+    .foot {
+      margin-top: 1.25rem;
+      padding-top: 1rem;
+      border-top: 1px solid var(--border);
+      font-size: 0.78rem;
+      color: var(--muted);
+      text-align: center;
+      line-height: 1.4;
+    }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>{% site_brand_name %}</h1>
+    <p class="sub">Identifique-se para acessar o painel.</p>
+
+    {% if form.non_field_errors %}
+      <div class="err">{{ form.non_field_errors|striptags }}</div>
+    {% endif %}
+
+    <form method="post" action="{% url 'accounts:login' %}" autocomplete="on" novalidate>
+      {% csrf_token %}
+      {% if request.GET.next %}
+      <input type="hidden" name="next" value="{{ request.GET.next }}">
+      {% endif %}
+
+      {% for field in form.visible_fields %}
+        <label for="{{ field.id_for_label }}">{{ field.label }}</label>
+        {{ field }}
+        {% if field.errors %}<p class="field-err">{{ field.errors|striptags }}</p>{% endif %}
+      {% endfor %}
+
+      <button type="submit">Entrar</button>
+    </form>
+
+    <p class="foot">Conexão segura recomendada. Não reutilize senhas de outros serviços.</p>
+  </div>
+</body>
+</html>

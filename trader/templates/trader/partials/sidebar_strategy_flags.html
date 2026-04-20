@@ -1,0 +1,605 @@
+<div id="sidebar-estrategias" class="sidebar-strategy-flags sidebar-text" style="padding:0.65rem 0.75rem 0.85rem;">
+  <style>
+    .sidebar-strategy-list { display: flex; flex-direction: column; gap: 0.45rem; }
+    .sidebar-strategy-row {
+      display: flex;
+      align-items: flex-start;
+      gap: 0.45rem;
+      font-size: 0.78rem;
+      line-height: 1.35;
+    }
+    .sidebar-strategy-main {
+      flex: 1;
+      min-width: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 0.18rem;
+    }
+    .sidebar-strategy-extra {
+      display: flex;
+      align-items: center;
+      gap: 0.45rem;
+      color: var(--sidebar-muted);
+      font-size: 0.68rem;
+      line-height: 1.2;
+      flex-wrap: wrap;
+    }
+    .sidebar-strategy-extra input[type="checkbox"] {
+      width: 0.82rem;
+      height: 0.82rem;
+      margin-top: 0;
+    }
+    .sidebar-strategy-extra input[type="number"] {
+      width: 5.5rem;
+      border: 1px solid var(--border);
+      border-radius: 7px;
+      background: var(--bg);
+      color: var(--fg);
+      padding: 0.12rem 0.3rem;
+      font-size: 0.68rem;
+    }
+    .sidebar-strategy-row input[type="checkbox"] {
+      margin-top: 0.14rem;
+      width: 0.95rem;
+      height: 0.95rem;
+      flex-shrink: 0;
+    }
+    .sidebar-strategy-row .strat-modal-open {
+      flex: 1;
+      min-width: 0;
+      margin: 0;
+      padding: 0;
+      border: none;
+      background: none;
+      color: var(--fg);
+      font: inherit;
+      font-weight: 700;
+      text-align: left;
+      cursor: pointer;
+      text-decoration: underline dotted transparent;
+      text-underline-offset: 0.12em;
+    }
+    .sidebar-strategy-row .strat-modal-open:hover,
+    .sidebar-strategy-row .strat-modal-open:focus-visible {
+      text-decoration-color: var(--nav-active);
+      outline: none;
+    }
+    .strat-modal-backdrop {
+      position: fixed;
+      inset: 0;
+      background: rgba(2, 6, 23, 0.56);
+      display: none;
+      align-items: center;
+      justify-content: center;
+      z-index: 1250;
+      padding: 0.75rem;
+    }
+    .strat-modal-backdrop.is-open { display: flex; }
+    .strat-modal-card {
+      width: min(420px, 94vw);
+      max-height: 86vh;
+      overflow: auto;
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      background: var(--nav-bg);
+      box-shadow: 0 18px 48px rgba(2, 6, 23, 0.4);
+      padding: 0.65rem 0.75rem 0.8rem;
+    }
+    .strat-modal-head {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 0.5rem;
+      margin-bottom: 0.55rem;
+    }
+    .strat-modal-head h3 {
+      margin: 0;
+      font-size: 0.88rem;
+      font-weight: 700;
+      line-height: 1.3;
+    }
+    .strat-modal-close {
+      border: 1px solid var(--border);
+      background: var(--bg);
+      color: var(--fg);
+      width: 1.75rem;
+      height: 1.75rem;
+      border-radius: 8px;
+      cursor: pointer;
+      line-height: 1;
+      font-size: 1rem;
+      padding: 0;
+      flex-shrink: 0;
+    }
+    .strat-modal-close:hover { border-color: var(--nav-active); }
+    .strat-modal-section-title {
+      margin: 0 0 0.28rem;
+      font-size: 0.72rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      color: var(--sidebar-muted);
+    }
+    .strat-modal-config {
+      margin: 0 0 0.65rem;
+      padding: 0;
+    }
+    .strat-modal-config dt {
+      margin: 0.35rem 0 0.08rem;
+      font-size: 0.74rem;
+      font-weight: 600;
+      color: var(--fg);
+    }
+    .strat-modal-config dt:first-child { margin-top: 0; }
+    .strat-modal-config dd {
+      margin: 0;
+      padding: 0;
+      font-size: 0.74rem;
+      color: var(--sidebar-muted);
+      line-height: 1.45;
+    }
+    .strat-modal-muted {
+      margin: 0 0 0.55rem;
+      font-size: 0.74rem;
+      color: var(--sidebar-muted);
+      line-height: 1.45;
+    }
+    .strat-modal-desc {
+      margin: 0;
+      font-size: 0.76rem;
+      color: var(--fg);
+      line-height: 1.5;
+    }
+    .strat-modal-hero {
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      background: linear-gradient(180deg, rgba(30,64,175,0.18), rgba(15,23,42,0.32));
+      padding: 0.45rem;
+      margin: 0 0 0.55rem;
+    }
+    .strat-modal-hero p {
+      margin: 0.32rem 0 0;
+      font-size: 0.72rem;
+      color: var(--sidebar-muted);
+      line-height: 1.35;
+    }
+    .automation-live-focus {
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      background: var(--bg);
+      padding: 0.5rem 0.55rem;
+      margin: 0 0 0.55rem;
+    }
+    .automation-live-focus .focus-title {
+      margin: 0 0 0.18rem;
+      font-size: 0.7rem;
+      font-weight: 700;
+      color: var(--sidebar-muted);
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+    }
+    .automation-live-focus .focus-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 0.5rem;
+      flex-wrap: wrap;
+    }
+    .automation-live-focus .focus-label {
+      font-size: 0.76rem;
+      font-weight: 700;
+      line-height: 1.25;
+    }
+    .automation-live-focus .focus-hint {
+      margin: 0.18rem 0 0;
+      font-size: 0.68rem;
+      color: var(--sidebar-muted);
+      line-height: 1.3;
+    }
+    .automation-live-focus select {
+      min-width: 6.8rem;
+      max-width: 9rem;
+      padding: 0.2rem 0.35rem;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      background: var(--bg);
+      color: var(--fg);
+      font-size: 0.74rem;
+    }
+    .automation-runtime-card {
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 0.55rem 0.6rem;
+      margin: 0 0 0.55rem;
+      background: var(--bg);
+    }
+    .automation-runtime-card.is-on {
+      border-color: rgba(16, 185, 129, 0.6);
+      box-shadow: inset 0 0 0 1px rgba(16, 185, 129, 0.25);
+    }
+    .automation-runtime-card.is-off {
+      border-color: rgba(239, 68, 68, 0.6);
+      box-shadow: inset 0 0 0 1px rgba(239, 68, 68, 0.2);
+    }
+    .automation-runtime-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 0.5rem;
+      margin: 0 0 0.3rem;
+    }
+    .automation-runtime-title {
+      margin: 0;
+      font-size: 0.78rem;
+      font-weight: 800;
+      letter-spacing: 0.03em;
+      text-transform: uppercase;
+    }
+    .automation-runtime-state {
+      font-size: 0.68rem;
+      font-weight: 700;
+      padding: 0.1rem 0.4rem;
+      border-radius: 999px;
+      border: 1px solid var(--border);
+      background: var(--nav-bg);
+    }
+    .automation-runtime-btn {
+      width: 100%;
+      padding: 0.44rem 0.5rem;
+      border-radius: 9px;
+      border: 1px solid var(--border);
+      cursor: pointer;
+      font-size: 0.76rem;
+      font-weight: 800;
+      letter-spacing: 0.02em;
+    }
+    .automation-runtime-btn--on {
+      background: rgba(239, 68, 68, 0.14);
+      color: #ef4444;
+      border-color: rgba(239, 68, 68, 0.45);
+    }
+    .automation-runtime-btn--off {
+      background: rgba(16, 185, 129, 0.14);
+      color: #10b981;
+      border-color: rgba(16, 185, 129, 0.45);
+    }
+    .automation-runtime-hint {
+      margin: 0.32rem 0 0;
+      font-size: 0.68rem;
+      color: var(--sidebar-muted);
+      line-height: 1.3;
+    }
+  </style>
+  <p class="sidebar-boleta-title">Estrategias</p>
+  <span class="automation-env-pill" style="display:inline-flex;margin-bottom:0.5rem;font-size:0.68rem;" title="Ambiente dos interruptores">
+    Ambiente: <strong>{{ automation_environment_label }}</strong>
+  </span>
+  <form method="post" action="{% url 'trader:automations_dashboard' %}" class="automation-runtime-card {% if automation_robot_enabled %}is-on{% else %}is-off{% endif %}" style="margin-bottom:0.55rem;">
+    {% csrf_token %}
+    <input type="hidden" name="form_name" value="automation_runtime_toggle">
+    <input type="hidden" name="runtime_environment" value="{{ automation_environment_value }}">
+    <input type="hidden" name="robot_enabled" value="{% if automation_robot_enabled %}0{% else %}1{% endif %}">
+    <div class="automation-runtime-head">
+      <p class="automation-runtime-title">Robô principal</p>
+      <span class="automation-runtime-state">{% if automation_robot_enabled %}ATIVO{% else %}DESATIVADO{% endif %}</span>
+    </div>
+    <button type="submit" name="runtime_action" value="toggle" class="automation-runtime-btn {% if automation_robot_enabled %}automation-runtime-btn--on{% else %}automation-runtime-btn--off{% endif %}">
+      {% if automation_robot_enabled %}Desativar robô{% else %}Ativar robô{% endif %}
+    </button>
+    <div style="margin-top:0.4rem;display:flex;align-items:center;gap:0.4rem;flex-wrap:wrap;">
+      <label style="font-size:0.7rem;color:var(--sidebar-muted);font-weight:600;">
+        Máx. operações abertas
+      </label>
+      <input type="number" name="max_open_operations" min="1" max="10" step="1" value="{{ automation_max_open_operations|default:1 }}" style="width:4.8rem;padding:0.2rem 0.3rem;border-radius:8px;border:1px solid var(--border);background:var(--bg);color:var(--fg);font-size:0.72rem;">
+      <button type="submit" name="runtime_action" value="save_limit" class="automation-runtime-btn" style="width:auto;padding:0.24rem 0.5rem;font-size:0.7rem;font-weight:700;">
+        Salvar limite
+      </button>
+    </div>
+    <p class="automation-runtime-hint">Controle global por ambiente (Simulador/Real). Salvo automaticamente.</p>
+  </form>
+  <form id="automations-strategy-form" method="post" action="{% url 'trader:automations_dashboard' %}" class="sidebar-strategy-form">
+    {% csrf_token %}
+    <input type="hidden" name="form_name" value="automation_strategies">
+    <div class="automation-live-focus">
+      <p class="focus-title">Ticker do bot</p>
+      <div class="focus-row">
+        <span class="focus-label">Execução em tempo real</span>
+        <select name="automation_live_ticker" aria-label="Ticker único do bot">
+          <option value="" {% if not automation_live_selected_ticker %}selected{% endif %}>Todos</option>
+          {% for sym in automation_live_ticker_choices %}
+          <option value="{{ sym }}" {% if sym == automation_live_selected_ticker %}selected{% endif %}>{{ sym }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <p class="focus-hint">Escolha um ativo para o robô operar só nele. Em “Todos”, usa todos os monitorados.</p>
+    </div>
+    <p style="font-size:0.72rem;font-weight:700;margin:0.45rem 0 0.2rem;color:var(--sidebar-muted);text-transform:uppercase;letter-spacing:0.04em;">
+      Execução global
+    </p>
+    <label class="sidebar-strategy-row" style="margin-bottom:0.35rem;">
+      <input
+        type="checkbox"
+        name="automation_trailing_stop_adjustment"
+        value="on"
+        {# ``default`` substitui também ``False`` — usar ``default_if_none`` para poder desligar o trailing. #}
+        {% if automation_trailing_adjustment_enabled|default_if_none:True %}checked{% endif %}
+        aria-label="Ajuste automático de stop após entrada"
+      >
+      <span class="sidebar-strategy-main" style="font-size:0.78rem;">
+        <button type="button" class="strat-modal-open" data-strat-modal="trailing-modal" aria-haspopup="dialog" aria-controls="trailing-modal" style="font-size:0.78rem;font-weight:700;">
+          Ajuste automático de stop (trailing) após ordem
+        </button>
+        <span class="hint" style="display:block;margin-top:0.18rem;font-weight:500;line-height:1.35;">
+          Aplica-se a todas as estratégias com bracket. Clique no título para ver os parâmetros detalhados.
+        </span>
+      </span>
+    </label>
+    <div id="trailing-modal" class="strat-modal-backdrop" aria-hidden="true">
+      <div class="strat-modal-card" role="dialog" aria-modal="true" aria-labelledby="trailing-modal-title">
+        <div class="strat-modal-head">
+          <h3 id="trailing-modal-title">Ajuste automático de stop (trailing)</h3>
+          <button type="button" class="strat-modal-close" data-strat-modal-close="trailing-modal" aria-label="Fechar">×</button>
+        </div>
+        <span class="hint" style="display:block;margin-top:0.22rem;font-weight:500;line-height:1.35;">
+          Largura TP/SL inicial: <code>TRADER_BRACKET_SL_DISTANCE_MULT</code> (predef. 5) e
+          <code>TRADER_BRACKET_TP_DISTANCE_MULT</code> (predef. 4).
+        </span>
+        <span class="hint" style="display:block;margin-top:0.22rem;font-weight:500;line-height:1.35;">
+          Trailing: <code>TRADER_TRAILING_STOP_TICKS</code> (12), MFE
+          <code>TRADER_TRAILING_MIN_FAVORABLE_TICKS</code> (50), piso
+          <code>TRADER_TRAILING_PROTECTION_FLOOR_TICKS</code> (28).
+        </span>
+        <span class="hint" style="display:block;margin-top:0.22rem;font-weight:500;line-height:1.35;">
+          Lock lucro: <code>TRADER_TRAILING_LOCK_PROFIT_ARM_PCT</code> /
+          <code>TRADER_TRAILING_LOCK_PROFIT_FLOOR_PCT</code> (3 % / 1 %),
+          TP segue pico <code>TRADER_TRAILING_TP_FOLLOW_PEAK_TICKS</code> (6).
+        </span>
+      </div>
+    </div>
+    {% regroup strategies_display by automation_role as strat_role_groups %}
+    {% for rg in strat_role_groups %}
+      <p style="font-size:0.72rem;font-weight:700;margin:0.55rem 0 0.28rem;color:var(--sidebar-muted);text-transform:uppercase;letter-spacing:0.04em;">
+        {% if rg.grouper == 'passive' %}
+          Passivas <span style="font-weight:600;opacity:0.88;">(só informam)</span>
+        {% else %}
+          Ativas <span style="font-weight:600;opacity:0.88;">(disparam ou condicionam operações)</span>
+        {% endif %}
+      </p>
+      {% regroup rg.list by group as strat_groups %}
+      {% for g in strat_groups %}
+        <div class="sidebar-strategy-list">
+          {% for s in g.list %}
+          <div class="sidebar-strategy-row">
+            <input type="checkbox" name="strategy_{{ s.key }}" value="on" id="strategy_cb_{{ s.key }}" {% if s.enabled %}checked{% endif %} aria-label="Ativar {{ s.title }}">
+            <div class="sidebar-strategy-main">
+              <button type="button" class="strat-modal-open" data-strat-modal="strat-modal-{{ s.key }}" aria-haspopup="dialog" aria-controls="strat-modal-{{ s.key }}">{{ s.title }}</button>
+              <div class="sidebar-strategy-extra">
+                {% if s.automation_role == 'active' %}
+                <label title="Se marcado, estratégia ativa pode executar ordem conforme ambiente.">
+                  <input type="checkbox" name="strategy_exec_{{ s.key }}" value="on" {% if s.execute_orders %}checked{% endif %}>
+                  executar ordem
+                </label>
+                {% endif %}
+                {% if s.key == 'teste_limite_preco_34' %}
+                <label title="Preço de disparo da estratégia de teste.">
+                  limiar
+                  <input type="number" step="0.01" min="0" name="strategy_param_teste_limite_preco_34_threshold" value="{{ s.params.threshold|default:'34.11' }}">
+                </label>
+                {% endif %}
+              </div>
+            </div>
+          </div>
+          {% endfor %}
+        </div>
+      {% endfor %}
+    {% endfor %}
+    <button type="submit" class="submit" style="margin-top:0.65rem;width:100%;padding:0.45rem 0.5rem;font-size:0.82rem;">Salvar estrategias</button>
+  </form>
+  {% for s in strategies_display %}
+    <div id="strat-modal-{{ s.key }}" class="strat-modal-backdrop" aria-hidden="true">
+      <div class="strat-modal-card" role="dialog" aria-modal="true" aria-labelledby="strat-modal-title-{{ s.key }}">
+        <div class="strat-modal-head">
+          <h3 id="strat-modal-title-{{ s.key }}">{{ s.title }}</h3>
+          <button type="button" class="strat-modal-close" data-strat-modal-close="strat-modal-{{ s.key }}" aria-label="Fechar">×</button>
+        </div>
+        <div class="strat-modal-hero">
+          <svg viewBox="0 0 320 90" width="100%" height="72" aria-hidden="true">
+            <rect x="1" y="1" width="318" height="88" rx="9" fill="rgba(15,23,42,0.45)" stroke="rgba(148,163,184,0.35)"/>
+            <line x1="18" y1="72" x2="300" y2="72" stroke="#334155" stroke-width="1"/>
+            <line x1="18" y1="18" x2="18" y2="72" stroke="#334155" stroke-width="1"/>
+            {% if s.automation_role == 'active' %}
+            <polyline points="22,64 72,58 118,52 166,46 222,35 286,24" fill="none" stroke="#38bdf8" stroke-width="2"/>
+            <circle cx="286" cy="24" r="4.2" fill="#22c55e"/>
+            {% else %}
+            <polyline points="22,54 68,48 118,52 168,47 214,51 286,45" fill="none" stroke="#a78bfa" stroke-width="2"/>
+            <circle cx="286" cy="45" r="4.2" fill="#a78bfa"/>
+            {% endif %}
+          </svg>
+          <p>
+            {% if s.automation_role == 'active' %}
+            Estratégia ativa: pode apenas alertar ou executar ordem (checkbox "executar ordem"), respeitando o ambiente atual (Simulador/Real).
+            {% else %}
+            Estratégia passiva: apenas informa sinais e contexto no log/gráfico; não envia ordens.
+            {% endif %}
+          </p>
+        </div>
+        {% if s.key == 'tendencia_mercado' or s.key == 'tendencia_mercado_ativa' %}
+        <p class="strat-modal-section-title">Janela de candles (opcional)</p>
+        <p class="strat-modal-muted">
+          {% if s.key == 'tendencia_mercado' %}
+          Quantas velas usar no cálculo da tendência. Vazio = padrão original (automático: até 48 velas, mínimo 12).
+          {% else %}
+          Mesma lógica da passiva: vazio = padrão automático. A estratégia ativa usa o sinal para alerta; com «executar ordem» e permissões de ambiente, envia bracket (TP/SL) e aplica trailing no stop.
+          {% endif %}
+        </p>
+        <label class="strat-modal-muted" style="display:flex;align-items:center;gap:0.45rem;flex-wrap:wrap;margin:0 0 0.55rem;">
+          Nº de candles (12–200)
+          <input
+            form="automations-strategy-form"
+            type="number"
+            name="strategy_param_{{ s.key }}_analysis_bars"
+            min="12"
+            max="200"
+            step="1"
+            value="{{ s.params.analysis_bars|default:'' }}"
+            placeholder="padrão"
+            style="max-width:7.5rem;padding:0.22rem 0.4rem;border-radius:8px;border:1px solid var(--border);background:var(--bg);color:var(--fg);font-size:0.76rem;"
+          >
+        </label>
+        {% if s.key == 'tendencia_mercado_ativa' %}
+        <p class="strat-modal-section-title" style="margin-top:0.65rem;">Disparo por conferências (grupo no gráfico)</p>
+        <p class="strat-modal-muted">
+          Nas últimas <strong>N</strong> análises por prefixo de velas, exige pelo menos <strong>M</strong> iguais ao sinal actual (Alta/Baixa).
+          Predefinição: <strong>N=5</strong>, <strong>M=1</strong> (dispara com o grupo mínimo coerente). Aumente <strong>M</strong> para exigir mais confirmações (tipo várias setas no gráfico).
+        </p>
+        <label class="strat-modal-muted" style="display:flex;align-items:center;gap:0.45rem;flex-wrap:wrap;margin:0 0 0.55rem;">
+          Nº de análises N (3–15)
+          <input
+            form="automations-strategy-form"
+            type="number"
+            name="strategy_param_tendencia_mercado_ativa_trend_vote_k"
+            min="3"
+            max="15"
+            step="1"
+            value="{{ s.params.trend_vote_k|default:'5' }}"
+            placeholder="5"
+            style="max-width:7.5rem;padding:0.22rem 0.4rem;border-radius:8px;border:1px solid var(--border);background:var(--bg);color:var(--fg);font-size:0.76rem;"
+          >
+        </label>
+        <label class="strat-modal-muted" style="display:flex;align-items:center;gap:0.45rem;flex-wrap:wrap;margin:0 0 0.55rem;">
+          Mín. conferências M (1–N)
+          <input
+            form="automations-strategy-form"
+            type="number"
+            name="strategy_param_tendencia_mercado_ativa_trend_group_hits_required"
+            min="1"
+            max="15"
+            step="1"
+            value="{{ s.params.trend_group_hits_required|default:'1' }}"
+            placeholder="1"
+            style="max-width:7.5rem;padding:0.22rem 0.4rem;border-radius:8px;border:1px solid var(--border);background:var(--bg);color:var(--fg);font-size:0.76rem;"
+          >
+        </label>
+        <p class="strat-modal-muted" style="margin-top:0.45rem;">
+          Filtro extra opcional: probabilidade mínima (fração das N leituras = ao sinal actual).
+          <strong>0</strong> = desligado (só M em N). Ex.: <strong>0,6</strong> = 60&nbsp;% (coerente com M=3 e N=5).
+        </p>
+        <label class="strat-modal-muted" style="display:flex;align-items:center;gap:0.45rem;flex-wrap:wrap;margin:0 0 0.55rem;">
+          Prob. mín. (0–1)
+          <input
+            form="automations-strategy-form"
+            type="number"
+            name="strategy_param_tendencia_mercado_ativa_trend_vote_prob_min"
+            min="0"
+            max="1"
+            step="0.05"
+            value="{{ s.params.trend_vote_prob_min|default:'0' }}"
+            placeholder="0"
+            style="max-width:7.5rem;padding:0.22rem 0.4rem;border-radius:8px;border:1px solid var(--border);background:var(--bg);color:var(--fg);font-size:0.76rem;"
+          >
+        </label>
+        <p class="strat-modal-muted" style="margin-top:0.5rem;">
+          Limiar de força só na <strong>ativa</strong> (Alta/Baixa vs lateral). <strong>Vazio</strong> = mesmo critério da passiva no gráfico (0,20), alinhado às setas.
+          Opcional: valor mais baixo (ex. 0,12) para disparar mais cedo, ou <code>TRADER_TENDENCIA_ATIVA_SCORE_THRESHOLD</code> no servidor.
+        </p>
+        <label class="strat-modal-muted" style="display:flex;align-items:center;gap:0.45rem;flex-wrap:wrap;margin:0 0 0.55rem;">
+          Limiar execução (0,05–0,95)
+          <input
+            form="automations-strategy-form"
+            type="number"
+            name="strategy_param_tendencia_mercado_ativa_score_threshold"
+            min="0.05"
+            max="0.95"
+            step="0.01"
+            value="{{ s.params.score_threshold|default:'' }}"
+            placeholder="vazio = 0,20 (passiva)"
+            style="max-width:7.5rem;padding:0.22rem 0.4rem;border-radius:8px;border:1px solid var(--border);background:var(--bg);color:var(--fg);font-size:0.76rem;"
+          >
+        </label>
+        <p class="strat-modal-muted" style="margin-top:0.55rem;">
+          <strong>Silêncio sem marcação passiva</strong> (setas da tendência no gráfico): se a última marcação
+          da passiva for mais antiga que este limite (segundos), a ordem <strong>não</strong> é disparada.
+          Vazio = silêncio <strong>desligado</strong> no servidor (mais disparos). Defina segundos para activar o filtro.
+        </p>
+        <label class="strat-modal-muted" style="display:flex;align-items:center;gap:0.45rem;flex-wrap:wrap;margin:0 0 0.55rem;">
+          Máx. silêncio (s)
+          <input
+            form="automations-strategy-form"
+            type="number"
+            name="strategy_param_tendencia_mercado_ativa_max_silence_sec"
+            min="0"
+            max="604800"
+            step="60"
+            value="{{ s.params.max_silence_sec|default:'' }}"
+            placeholder="900"
+            style="max-width:7.5rem;padding:0.22rem 0.4rem;border-radius:8px;border:1px solid var(--border);background:var(--bg);color:var(--fg);font-size:0.76rem;"
+          >
+        </label>
+        {% endif %}
+        {% endif %}
+        <p class="strat-modal-section-title">Configurações</p>
+        {% if s.config_items %}
+        <dl class="strat-modal-config">
+          {% for item in s.config_items %}
+          <dt>{{ item.name }}</dt>
+          <dd>{{ item.detail }}</dd>
+          {% endfor %}
+        </dl>
+        {% else %}
+          <p class="strat-modal-muted">Nenhuma configuração listada para esta estratégia.</p>
+        {% endif %}
+        <p class="strat-modal-section-title">Funcionamento</p>
+        <p class="strat-modal-desc">{{ s.description }}</p>
+        <p class="strat-modal-muted" style="margin-top:0.45rem;">
+          Ambiente atual: <strong>{{ automation_environment_label }}</strong>. Em Real, execute com cautela.
+        </p>
+      </div>
+    </div>
+  {% endfor %}
+  <p style="font-size:0.72rem;color:var(--sidebar-muted);margin:0.55rem 0 0;line-height:1.4;">
+    Boleta manual oculta nesta pagina. Estado: <a href="{% url 'trader:automations_state_json' %}" style="color:var(--nav-active);">estado.json</a>
+  </p>
+  <script>
+  (function () {
+    var root = document.getElementById('sidebar-estrategias');
+    if (!root) return;
+    function openModal(id) {
+      var el = document.getElementById(id);
+      if (!el) return;
+      el.classList.add('is-open');
+      el.setAttribute('aria-hidden', 'false');
+    }
+    function closeModal(id) {
+      var el = document.getElementById(id);
+      if (!el) return;
+      el.classList.remove('is-open');
+      el.setAttribute('aria-hidden', 'true');
+    }
+    root.addEventListener('click', function (ev) {
+      var t = ev.target;
+      if (!(t instanceof Element)) return;
+      var openBtn = t.closest('.strat-modal-open');
+      if (openBtn && root.contains(openBtn)) {
+        var mid = openBtn.getAttribute('data-strat-modal');
+        if (mid) { ev.preventDefault(); openModal(mid); }
+        return;
+      }
+      var closeBtn = t.closest('[data-strat-modal-close]');
+      if (closeBtn && root.contains(closeBtn)) {
+        var cid = closeBtn.getAttribute('data-strat-modal-close');
+        if (cid) closeModal(cid);
+        return;
+      }
+      if (t.classList.contains('strat-modal-backdrop') && t.classList.contains('is-open')) {
+        closeModal(t.id);
+      }
+    });
+    document.addEventListener('keydown', function (ev) {
+      if (ev.key !== 'Escape') return;
+      root.querySelectorAll('.strat-modal-backdrop.is-open').forEach(function (el) {
+        closeModal(el.id);
+      });
+    });
+  })();
+  </script>
+</div>

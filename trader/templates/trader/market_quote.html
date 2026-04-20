@@ -1,0 +1,47 @@
+{% extends "trader/base.html" %}
+{% block title %}Mercado — {{ ticker }}{% endblock %}
+{% block extra_css %}
+<style>
+  .hint { color: var(--muted); font-size: 0.9rem; }
+  .grid { display: grid; gap: 1rem; }
+  @media (min-width: 720px) { .grid-2 { grid-template-columns: 1fr 1fr; } }
+  section.panel {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 1rem;
+    background: var(--nav-bg);
+  }
+  section.panel h2 { margin-top: 0; font-size: 1.05rem; }
+  dl.grid-dl { display: grid; grid-template-columns: auto 1fr; gap: 0.25rem 1rem; margin: 0; }
+  .err { color: #b3261e; font-size: 0.9rem; }
+  .chips { display: flex; flex-wrap: wrap; gap: 0.35rem; margin-top: 0.35rem; }
+  .chips a {
+    font-size: 0.85rem;
+    padding: 0.2rem 0.55rem;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    text-decoration: none;
+    color: var(--fg);
+    background: var(--bg);
+  }
+  .chips a:hover { border-color: var(--nav-active); }
+  table.book { width: 100%; border-collapse: collapse; font-size: 0.88rem; }
+  table.book th, table.book td { padding: 0.25rem 0.4rem; text-align: right; border-bottom: 1px solid var(--border); }
+  table.book th:first-child, table.book td:first-child { text-align: left; }
+  .chart-wrap { position: relative; height: 220px; max-width: 100%; }
+</style>
+{% endblock %}
+{% block content %}
+  <h1>Mercado — day trade</h1>
+  <p class="hint">
+    Foco em <strong>Mini Índice (WIN)</strong> e <strong>Mini Dólar (WDO)</strong>. REST: details, quote, book e aggregate-book.
+    {% if market_live_poll %}Painel abaixo atualiza em intervalo moderado (sugestão no JSON; típico ~2s). {% endif %}Ajuste o vencimento do contrato (ex.: WIN<strong>J</strong>25) conforme o rolamento. Streaming contínuo = WebSocket (fora deste painel REST).
+  </p>
+  {% include "trader/partials/market_panel.html" %}
+{% endblock %}
+
+{% block extra_js %}
+{% if market_live_poll %}
+{% include "trader/partials/market_live_poll.html" %}
+{% endif %}
+{% endblock %}

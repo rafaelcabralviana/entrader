@@ -1,0 +1,29 @@
+{% extends "trader/base.html" %}
+{% block title %}{{ page_title }}{% endblock %}
+{% block extra_css %}
+<style>
+  .hint { color: var(--muted); font-size: 0.92rem; margin-top: 0; }
+  .panel {
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 1.25rem;
+    background: var(--nav-bg);
+    margin-top: 1rem;
+  }
+  .err { color: #b3261e; }
+  pre.ok { overflow: auto; font-size: 0.82rem; margin: 0; max-height: 50vh; }
+</style>
+{% endblock %}
+{% block content %}
+  <h1>{% if trading_environment_is_real %}Envio de ordem{% else %}Envio de ordem (simulador){% endif %}</h1>
+  <p class="hint">{% if trading_environment_is_real %}Ambiente real: envio para a API com assinatura (<code>BODY_SIGNATURE</code>). Configure credenciais e chave RSA no <code>.env</code>.{% else %}Use a boleta à esquerda. Ambiente de teste: configure credenciais e chave no <code>.env</code>.{% endif %}</p>
+  {% if send_error %}
+    <p class="err panel" style="margin-top:1rem;">{{ send_error }}</p>
+  {% endif %}
+  {% if result_json %}
+  <section class="panel">
+    <h2 style="margin-top:0;font-size:1.05rem;">Resposta da API</h2>
+    <pre class="ok">{{ result_json }}</pre>
+  </section>
+  {% endif %}
+{% endblock %}

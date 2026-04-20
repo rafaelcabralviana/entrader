@@ -1,0 +1,18 @@
+<div class="sidebar-boleta-wrap" id="boleta">
+  <p class="sidebar-boleta-title sidebar-text">{% if trading_environment_is_real %}Boleta{% else %}Boleta (simulador){% endif %}</p>
+  {% include "trader/automacoes/boleta_auto_stop.html" %}
+  <form method="post" action="{% if request.META.QUERY_STRING %}{{ request.path }}?{{ request.META.QUERY_STRING }}{% else %}{{ request.path }}{% endif %}" class="sidebar-boleta-form">
+    {% csrf_token %}
+    {% include "trader/partials/order_ticket_inner.html" with compact=1 %}
+    <button type="submit" class="sidebar-boleta-submit">Enviar ordem</button>
+  </form>
+  {% if send_error %}
+    <p class="sidebar-boleta-msg sidebar-boleta-msg--err sidebar-text" role="alert">{{ send_error }}</p>
+  {% endif %}
+  {% if result_json %}
+    <details class="sidebar-boleta-details sidebar-text">
+      <summary>Resposta da API</summary>
+      <pre class="sidebar-boleta-pre">{{ result_json }}</pre>
+    </details>
+  {% endif %}
+</div>

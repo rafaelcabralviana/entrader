@@ -1,0 +1,26 @@
+{% extends "trader/base.html" %}
+{% block title %}{{ page_title }}{% endblock %}
+{% block extra_css %}
+<style>
+  .err { color: #b3261e; font-size: 0.95rem; }
+  .hint { color: var(--muted); font-size: 0.9rem; }
+  section.panel {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 1rem;
+    background: var(--nav-bg);
+    margin-top: 1rem;
+  }
+  table.data { width: 100%; border-collapse: collapse; font-size: 0.88rem; }
+  table.data th, table.data td { padding: 0.35rem 0.5rem; border-bottom: 1px solid var(--border); text-align: left; }
+  table.data th { font-weight: 600; }
+  pre.raw { overflow: auto; font-size: 0.82rem; margin: 0; max-height: 70vh; }
+</style>
+{% endblock %}
+{% block content %}
+  <h1>Ordens do dia</h1>
+  <p class="hint">Ordens do pregão atual (consulta com limite de 1 requisição por segundo).</p>
+  <div id="orders-live-inner">
+    {% include "trader/partials/orders_panel.html" %}
+  </div>
+{% endblock %}

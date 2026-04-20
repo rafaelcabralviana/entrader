@@ -1,0 +1,268 @@
+{% load site_extras %}
+{# Requer: ticker, errors, details, quote, book, aggregate_book, agg_bids, agg_asks, chart_payload, operation_hints, ticker_suggestions_daytrade, ticker_suggestions_equities #}
+<div class="mp-toolbar">
+  <form class="mp-form" method="get" action="{% if request.resolver_match.url_name == 'home' %}{% url 'trader:home' %}{% else %}{% url 'trader:market_quote' %}{% endif %}" style="display:flex;flex-wrap:wrap;gap:0.5rem;align-items:flex-end;">
+    <label>
+      Ticker
+      <input type="text" name="ticker" value="{{ ticker }}" maxlength="16" style="padding:0.35rem 0.5rem;width:9rem;" autocomplete="off">
+    </label>
+    <button type="submit">Consultar</button>
+  </form>
+  <div class="mp-chips-block">
+    <p class="hint"><strong>BMF — day trade</strong> (principal):</p>
+    <div class="chips">
+      {% for s in ticker_suggestions_daytrade %}
+        <a href="?ticker={{ s }}">{{ s }}</a>
+      {% endfor %}
+    </div>
+    <p class="hint" style="margin-top:0.75rem;"><strong>Ações</strong> (BOVESPA, exemplo):</p>
+    <div class="chips">
+      {% for s in ticker_suggestions_equities %}
+        <a href="?ticker={{ s }}">{{ s }}</a>
+      {% endfor %}
+    </div>
+    <div class="mp-config-trigger">
+      <button type="button" class="submit mp-open-settings" id="mp-open-settings">Configurações</button>
+    </div>
+  </div>
+</div>
+
+<div class="mp-modal-backdrop" id="mp-settings-modal" aria-hidden="true">
+  <div class="mp-modal-card" role="dialog" aria-modal="true" aria-labelledby="mp-settings-title">
+    <div class="mp-modal-head">
+      <h3 id="mp-settings-title">Configurações de digitação</h3>
+      <button type="button" class="mp-modal-close" id="mp-close-settings" aria-label="Fechar">×</button>
+    </div>
+
+    <div class="mp-modal-body">
+      <p class="hint" style="margin-bottom:0.35rem;">
+        Rolamento BMF: se você digitar <code>WIN</code> ou <code>WDO</code> no ticker, o sistema
+        escolhe automaticamente o contrato em <strong>Trading</strong> (não <strong>EndOfDay</strong>).
+      </p>
+      <form method="post" action="{% url 'trader:save_daytrade_candidates' %}" class="mp-modal-form">
+        {% csrf_token %}
+        <input type="hidden" name="next" value="{{ request.get_full_path }}">
+        <div class="mp-modal-grid">
+          <label>
+            WIN candidatos
+            <input type="text" name="win_candidates" value="{{ daytrade_win_candidates_text }}" maxlength="255" autocomplete="off">
+          </label>
+          <label>
+            WDO candidatos
+            <input type="text" name="wdo_candidates" value="{{ daytrade_wdo_candidates_text }}" maxlength="255" autocomplete="off">
+          </label>
+        </div>
+        <button type="submit">Salvar</button>
+      </form>
+
+      <p class="hint" style="margin:0.8rem 0 0.35rem;">
+        Coleta Celery (quote/snapshots): informe os tickers monitorados em tempo real
+        (separados por vírgula). Para excluir, remova da lista e salve.
+      </p>
+      <form method="post" action="{% url 'trader:save_watch_tickers' %}" class="mp-modal-form">
+        {% csrf_token %}
+        <input type="hidden" name="next" value="{{ request.get_full_path }}">
+        <label>
+          Tickers monitorados (Celery)
+          <input type="text" name="watch_tickers" value="{{ watch_tickers_text }}" maxlength="1024" autocomplete="off">
+        </label>
+        <button type="submit">Salvar monitoramento</button>
+      </form>
+    </div>
+  </div>
+</div>
+
+<script>
+(function() {
+  var LAST_TICKER_KEY = 'ui.last_selected_ticker';
+  var openBtn = document.getElementById('mp-open-settings');
+  var modal = document.getElementById('mp-settings-modal');
+  var closeBtn = document.getElementById('mp-close-settings');
+  var chips = document.querySelectorAll('.mp-chips-block .chips a[href*="ticker="]');
+
+  function setTickerInputs(sym) {
+    if (!sym) return;
+    var ticker = String(sym).trim().toUpperCase();
+    if (!ticker) return;
+    var boletaTicker = document.getElementById('boleta-order-ticker');
+    if (boletaTicker) boletaTicker.value = ticker;
+    var candlesTicker = document.getElementById('candles-ticker');
+    if (candlesTicker) candlesTicker.value = ticker;
+    var marketTicker = document.querySelector('.mp-form input[name="ticker"]');
+    if (marketTicker) marketTicker.value = ticker;
+  }
+
+  try {
+    var remembered = sessionStorage.getItem(LAST_TICKER_KEY);
+    if (remembered) setTickerInputs(remembered);
+  } catch (e) {}
+
+  for (var i = 0; i < chips.length; i++) {
+    chips[i].addEventListener('click', function(ev) {
+      var href = this.getAttribute('href') || '';
+      var m = href.match(/[?&]ticker=([^&]+)/i);
+      if (!m) return;
+      var ticker = decodeURIComponent(m[1] || '').trim().toUpperCase();
+      if (!ticker) return;
+      setTickerInputs(ticker);
+      try { sessionStorage.setItem(LAST_TICKER_KEY, ticker); } catch (e) {}
+    });
+  }
+
+  if (!openBtn || !modal || !closeBtn) return;
+
+  function openModal() {
+    modal.classList.add('is-open');
+    modal.setAttribute('aria-hidden', 'false');
+  }
+  function closeModal() {
+    modal.classList.remove('is-open');
+    modal.setAttribute('aria-hidden', 'true');
+  }
+
+  openBtn.addEventListener('click', openModal);
+  closeBtn.addEventListener('click', closeModal);
+  modal.addEventListener('click', function(ev) {
+    if (ev.target === modal) closeModal();
+  });
+  document.addEventListener('keydown', function(ev) {
+    if (ev.key === 'Escape' && modal.classList.contains('is-open')) closeModal();
+  });
+})();
+</script>
+
+<div id="market-live-zone">
+<div class="mp-cards-top">
+  <section class="panel mp-limits">
+    <h2>Limites de operação (referência doc)</h2>
+    <dl class="grid-dl">
+      <dt>Mercado</dt><dd>{{ operation_hints.mercado }}</dd>
+      <dt>Base BMF</dt><dd>{{ operation_hints.base_bmf }}</dd>
+      <dt>Máx. ordens / dia (envio)</dt><dd>{{ operation_hints.limite_ordens_dia }}</dd>
+      <dt>Máx. por ordem (boleta)</dt><dd>{{ operation_hints.limite_boleta }}</dd>
+    </dl>
+    <p class="hint" style="margin-bottom:0;">Cancelamento não consome limite diário; replace valida só boleta.</p>
+  </section>
+
+  <section class="panel">
+    <h2>Detalhes (TickerDetails)</h2>
+    {% if errors.details %}<p class="err">{{ errors.details }}</p>{% endif %}
+    {% if details %}
+      <dl class="grid-dl">
+        {% if "ticker" in details %}<dt>Ticker</dt><dd>{{ details.ticker }}</dd>{% endif %}
+        {% if "asset" in details %}<dt>Ativo</dt><dd>{{ details.asset }}</dd>{% endif %}
+        {% if "type" in details %}<dt>Tipo</dt><dd>{{ details.type }}</dd>{% endif %}
+        {% if "currency" in details %}<dt>Moeda</dt><dd>{{ details.currency }}</dd>{% endif %}
+        {% if "minOrderQty" in details %}<dt>Qtd. mín.</dt><dd>{{ details.minOrderQty }}</dd>{% endif %}
+        {% if "maxOrderQty" in details %}<dt>Qtd. máx.</dt><dd>{{ details.maxOrderQty }}</dd>{% endif %}
+        {% if "contractMultiplier" in details %}<dt>Multiplicador</dt><dd>{{ details.contractMultiplier }}</dd>{% endif %}
+        {% if "priceDivisor" in details %}<dt>Divisor preço</dt><dd>{{ details.priceDivisor }}</dd>{% endif %}
+      </dl>
+    {% elif not errors.details %}
+      <p class="hint">Sem dados.</p>
+    {% endif %}
+  </section>
+
+  <section class="panel">
+    <h2>Cotação (Quote)</h2>
+    {% if errors.quote %}<p class="err">{{ errors.quote }}</p>{% endif %}
+    {% if quote %}
+      <dl class="grid-dl">
+        {% if "ticker" in quote %}<dt>Ticker</dt><dd>{{ quote.ticker }}</dd>{% endif %}
+        {% if "lastPrice" in quote %}<dt>Último</dt><dd>{{ quote.lastPrice }}</dd>{% endif %}
+        {% if "lastQuantity" in quote %}<dt>Último vol.</dt><dd>{{ quote.lastQuantity }}</dd>{% endif %}
+        {% if quote.status %}<dt>Status</dt><dd>{{ quote.status }}</dd>{% endif %}
+        {% if quote.tradeDateTime %}<dt>Negócio</dt><dd>{{ quote.tradeDateTime|brt_datetime }}</dd>{% endif %}
+        {% if "open" in quote %}<dt>Abertura</dt><dd>{{ quote.open }}</dd>{% endif %}
+        {% if "high" in quote %}<dt>Máxima</dt><dd>{{ quote.high }}</dd>{% endif %}
+        {% if "low" in quote %}<dt>Mínima</dt><dd>{{ quote.low }}</dd>{% endif %}
+        {% if "close" in quote %}<dt>Fechamento</dt><dd>{{ quote.close }}</dd>{% endif %}
+        {% if quote.dateTime %}<dt>Timestamp</dt><dd>{{ quote.dateTime|brt_datetime }}</dd>{% endif %}
+      </dl>
+    {% elif not errors.quote %}
+      <p class="hint">Sem dados.</p>
+    {% endif %}
+  </section>
+</div>
+
+<div class="mp-lower mp-lower--books-only">
+    <section class="panel" style="margin-top:0;">
+      <h2>Livro de ofertas (Book)</h2>
+      {% if errors.book %}<p class="err">{{ errors.book }}</p>{% endif %}
+      {% if book %}
+        {% if not book.bids and not book.asks and not errors.book %}
+          <p class="hint">Livro vazio ou formato inesperado.</p>
+        {% else %}
+          {% with bids=book.bids|slice:":10" asks=book.asks|slice:":10" %}
+          <table class="book-compact">
+            <thead>
+              <tr>
+                <th>Pos. C</th>
+                <th>Preço C</th>
+                <th>Qtd. C</th>
+                <th>Qtd. V</th>
+                <th>Preço V</th>
+                <th>Pos. V</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for row in bids|zip_min:asks %}
+              <tr>
+                <td>{{ row.bid.position|default:"—" }}</td>
+                <td class="price"><span class="book-bid-price">{{ row.bid.price|default:"—" }}</span></td>
+                <td class="qty">{{ row.bid.quantity|default:"—" }}</td>
+                <td class="qty">{{ row.ask.quantity|default:"—" }}</td>
+                <td class="price"><span class="book-ask-price">{{ row.ask.price|default:"—" }}</span></td>
+                <td>{{ row.ask.position|default:"—" }}</td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+          {% endwith %}
+        {% endif %}
+      {% elif not errors.book %}
+        <p class="hint">Sem dados.</p>
+      {% endif %}
+    </section>
+
+    <section class="panel" style="margin-top:0;">
+      <h2>Livro agregado (Aggregate Book)</h2>
+      <p class="hint">Por preço (doc). Limite: 1 req/s.</p>
+      {% if errors.aggregate_book %}<p class="err">{{ errors.aggregate_book }}</p>{% endif %}
+      {% if aggregate_book %}
+        {% if not agg_bids and not agg_asks and not errors.aggregate_book %}
+          <p class="hint">Livro agregado vazio ou chaves diferentes do esperado (bids/asks).</p>
+        {% else %}
+          {% with bids=agg_bids|slice:":10" asks=agg_asks|slice:":10" %}
+          <table class="book-compact">
+            <thead>
+              <tr>
+                <th>Pos. C</th>
+                <th>Preço C</th>
+                <th>Qtd. C</th>
+                <th>Qtd. V</th>
+                <th>Preço V</th>
+                <th>Pos. V</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for row in bids|zip_min:asks %}
+              <tr>
+                <td>{{ row.bid.position|default:"—" }}</td>
+                <td class="price"><span class="book-bid-price">{{ row.bid.price|default:"—" }}</span></td>
+                <td class="qty">{{ row.bid.quantity|default:"—" }}</td>
+                <td class="qty">{{ row.ask.quantity|default:"—" }}</td>
+                <td class="price"><span class="book-ask-price">{{ row.ask.price|default:"—" }}</span></td>
+                <td>{{ row.ask.position|default:"—" }}</td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+          {% endwith %}
+        {% endif %}
+      {% elif not errors.aggregate_book %}
+        <p class="hint">Sem dados.</p>
+      {% endif %}
+    </section>
+</div>
+</div>

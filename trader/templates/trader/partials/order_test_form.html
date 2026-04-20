@@ -1,0 +1,15 @@
+<form method="post" action="{% if request.resolver_match.url_name == 'home' %}{% url 'trader:home' %}{% else %}{% url 'trader:send_order_test' %}{% endif %}" class="panel">
+  {% csrf_token %}
+  {% include "trader/partials/order_ticket_inner.html" %}
+  <button type="submit" class="submit">{% if trading_environment_is_real %}Enviar ordem{% else %}Enviar ordem de teste{% endif %}</button>
+</form>
+
+{% if send_error %}
+  <p class="err panel">{{ send_error }}</p>
+{% endif %}
+{% if result_json %}
+  <section class="panel">
+    <h2 style="margin-top:0;font-size:1rem;">Resposta da API</h2>
+    <pre class="ok">{{ result_json }}</pre>
+  </section>
+{% endif %}

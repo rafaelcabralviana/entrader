@@ -1,0 +1,179 @@
+<script>
+(function() {
+  var FRAG = "{% url 'trader:collateral_custody_fragment' %}";
+  var SNAPSHOT_URL = "{% url 'trader:market_snapshot_json' %}";
+  // Atualização mais rápida sem ficar agressivo (quote/busca externa tem limites).
+  var POLL_MS = 6500;
+  var bootTimer = null;
+  var pollTimer = null;
+  var financePollPaused = false;
+  var CUSTODY_TAB_KEY = 'entrade_custody_dual_src';
+
+  /**
+   * Sincroniza abas Corretora vs Replay fictício após cada refresh do strip.
+   * Scripts dentro do HTML injectado por innerHTML não executam; por isso esta lógica fica aqui.
+   */
+  function syncCustodyDualTab() {
+    var api = document.getElementById('custody-src-api');
+    var rep = document.getElementById('custody-src-replay');
+    if (!api || !rep) return;
+    try {
+      if (window.__ENTRADE_REPLAY_MODE__ || window.__ENTRADE_REPLAY_PLAYING__) {
+        rep.checked = true;
+        try { sessionStorage.setItem(CUSTODY_TAB_KEY, 'replay'); } catch (eS1) {}
+        return;
+      }
+      var pref = null;
+      try { pref = sessionStorage.getItem(CUSTODY_TAB_KEY); } catch (eS2) { pref = null; }
+      if (pref === 'replay') {
+        rep.checked = true;
+        return;
+      }
+      api.checked = true;
+    } catch (e) {}
+  }
+
+  if (!window.__ENTRADE_CUSTODY_DUAL_GLOBAL__) {
+    window.__ENTRADE_CUSTODY_DUAL_GLOBAL__ = true;
+    window.addEventListener('entrade:custody-replay-tab', function() {
+      var rep = document.getElementById('custody-src-replay');
+      if (rep) {
+        try {
+          rep.checked = true;
+          sessionStorage.setItem(CUSTODY_TAB_KEY, 'replay');
+        } catch (eEv) {}
+      }
+    });
+    document.addEventListener('change', function(ev) {
+      var t = ev && ev.target;
+      if (!t || !t.id) return;
+      if (t.id === 'custody-src-api') {
+        try { sessionStorage.setItem(CUSTODY_TAB_KEY, 'api'); } catch (eA) {}
+      } else if (t.id === 'custody-src-replay') {
+        try { sessionStorage.setItem(CUSTODY_TAB_KEY, 'replay'); } catch (eR) {}
+      }
+    });
+    document.addEventListener('click', function(ev) {
+      var t = ev && ev.target;
+      if (!t || !t.closest) return;
+      if (t.id === 'custody-replay-pnl-history-open' || (t.closest && t.closest('#custody-replay-pnl-history-open'))) {
+        var dlg = document.getElementById('custody-replay-pnl-history-dialog');
+        if (!dlg) return;
+        if (typeof dlg.showModal === 'function') {
+          dlg.showModal();
+        } else {
+          dlg.setAttribute('open', '');
+        }
+        return;
+      }
+      if (t.id === 'custody-replay-pnl-history-close' || (t.closest && t.closest('#custody-replay-pnl-history-close'))) {
+        var dlgC = document.getElementById('custody-replay-pnl-history-dialog');
+        if (!dlgC) return;
+        if (typeof dlgC.close === 'function') dlgC.close();
+        else dlgC.removeAttribute('open');
+      }
+    });
+    setInterval(syncCustodyDualTab, 1600);
+    document.addEventListener('visibilitychange', function() {
+      if (document.visibilityState === 'visible') syncCustodyDualTab();
+    });
+  }
+  window.__ENTRADE_SYNC_CUSTODY_DUAL_TAB__ = syncCustodyDualTab;
+
+  function refreshFinanceStrip() {
+    var el = document.getElementById('api-data-duo');
+    if (!el) return;
+    fetch(FRAG + '?t=' + Date.now(), {
+      credentials: 'same-origin',
+      headers: { 'Accept': 'text/html' }
+    })
+      .then(function(r) {
+        if (!r.ok) throw new Error('strip');
+        return r.text();
+      })
+      .then(function(html) {
+        el.innerHTML = html;
+        syncCustodyDualTab();
+      })
+      .catch(function() {});
+  }
+
+  function pauseFinancePolling() {
+    financePollPaused = true;
+    if (pollTimer) {
+      clearInterval(pollTimer);
+      pollTimer = null;
+    }
+  }
+
+  /** Só atualiza garantias/custódia quando o snapshot indica pregão ativo (alinhado ao painel de mercado). */
+  function tickFinanceStrip() {
+    if (document.visibilityState !== 'visible' || financePollPaused) return;
+    fetch(SNAPSHOT_URL + '?t=' + Date.now(), {
+      credentials: 'same-origin',
+      headers: { 'Accept': 'application/json' }
+    })
+      .then(function(r) {
+        if (r.status === 401 || r.status === 403) return null;
+        if (!r.ok) throw new Error('snapshot');
+        return r.json();
+      })
+      .then(function(d) {
+        if (!d) return;
+        var simPoll = d.simulator_custody_poll === true;
+        if (d.live_poll_active === false && !simPoll) {
+          pauseFinancePolling();
+          return;
+        }
+        refreshFinanceStrip();
+      })
+      .catch(function() {});
+  }
+
+  window.refreshFinanceStrip = refreshFinanceStrip;
+
+  function startPolling() {
+    if (financePollPaused) return;
+    if (pollTimer) clearInterval(pollTimer);
+    pollTimer = setInterval(tickFinanceStrip, POLL_MS);
+  }
+
+  function boot() {
+    syncCustodyDualTab();
+    refreshFinanceStrip();
+    bootTimer = setTimeout(tickFinanceStrip, 3200);
+    startPolling();
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', boot);
+  } else {
+    boot();
+  }
+
+  document.addEventListener('visibilitychange', function() {
+    if (document.visibilityState !== 'visible') return;
+    if (financePollPaused) {
+      fetch(SNAPSHOT_URL + '?t=' + Date.now(), {
+        credentials: 'same-origin',
+        headers: { 'Accept': 'application/json' }
+      })
+        .then(function(r) {
+          if (r.status === 401 || r.status === 403) return null;
+          if (!r.ok) throw new Error('snap');
+          return r.json();
+        })
+        .then(function(d) {
+          if (d && (d.live_poll_active === true || d.simulator_custody_poll === true)) {
+            financePollPaused = false;
+            startPolling();
+            refreshFinanceStrip();
+          }
+        })
+        .catch(function() {});
+      return;
+    }
+    refreshFinanceStrip();
+  });
+})();
+</script>

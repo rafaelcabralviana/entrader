@@ -1,0 +1,506 @@
+{% extends "trader/base.html" %}
+{% block title %}{{ page_title }}{% endblock %}
+{% block extra_css %}
+<style>
+  .dash-hero {
+    background: linear-gradient(135deg, rgba(37, 99, 235, 0.1) 0%, rgba(147, 51, 234, 0.05) 55%, transparent 100%);
+    border: 1px solid var(--border);
+    border-radius: 20px;
+    padding: 1.5rem 1.35rem 1.75rem;
+    margin-bottom: 1.5rem;
+    box-shadow: var(--shadow);
+  }
+  .dash-hero h1 {
+    margin: 0 0 0.4rem;
+    font-size: clamp(1.5rem, 3.5vw, 2rem);
+    font-weight: 800;
+    letter-spacing: -0.03em;
+  }
+  .dash-hero .lead { margin: 0; color: var(--muted); font-size: 0.98rem; max-width: 40rem; }
+  .section-wrap {
+    margin-bottom: 2.25rem;
+    scroll-margin-top: 5rem;
+  }
+  .section-wrap h2.section-h {
+    font-size: 1.15rem;
+    font-weight: 700;
+    margin: 0 0 0.35rem;
+    padding-bottom: 0.5rem;
+    border-bottom: 2px solid var(--nav-active);
+    display: inline-block;
+  }
+  .section-wrap > .sub { margin: 0 0 1rem; font-size: 0.9rem; color: var(--muted); }
+  .locked {
+    padding: 2rem 1.25rem;
+    text-align: center;
+    border: 1px dashed var(--border);
+    border-radius: 16px;
+    background: rgba(148, 163, 184, 0.06);
+  }
+  .locked p { margin: 0 0 1rem; color: var(--muted); }
+  .locked a {
+    display: inline-block;
+    padding: 0.55rem 1.25rem;
+    border-radius: 10px;
+    background: var(--nav-active);
+    color: #fff;
+    font-weight: 600;
+    text-decoration: none;
+  }
+  /* Mercado (shared com partial) */
+  .hint { color: var(--muted); font-size: 0.9rem; }
+  .grid { display: grid; gap: 1rem; }
+  @media (min-width: 720px) { .grid-2 { grid-template-columns: 1fr 1fr; } }
+  section.panel {
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 1rem;
+    background: var(--nav-bg);
+  }
+  section.panel h2 { margin-top: 0; font-size: 1.05rem; }
+  dl.grid-dl { display: grid; grid-template-columns: auto 1fr; gap: 0.25rem 1rem; margin: 0; }
+  .err { color: #b3261e; font-size: 0.9rem; }
+  .chips { display: flex; flex-wrap: wrap; gap: 0.35rem; margin-top: 0.35rem; }
+  .chips a {
+    font-size: 0.85rem;
+    padding: 0.2rem 0.55rem;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    text-decoration: none;
+    color: var(--fg);
+    background: var(--bg);
+  }
+  .chips a:hover { border-color: var(--nav-active); }
+  table.book { width: 100%; border-collapse: collapse; font-size: 0.88rem; }
+  table.book th, table.book td { padding: 0.25rem 0.4rem; text-align: right; border-bottom: 1px solid var(--border); }
+  table.book th:first-child, table.book td:first-child { text-align: left; }
+  .chart-wrap { position: relative; height: 220px; max-width: 100%; }
+  /* Ordens */
+  table.data { width: 100%; border-collapse: collapse; font-size: 0.88rem; }
+  table.data th, table.data td { padding: 0.35rem 0.5rem; border-bottom: 1px solid var(--border); text-align: left; }
+  table.data th { font-weight: 600; }
+  pre.raw { overflow: auto; font-size: 0.82rem; margin: 0; max-height: 50vh; }
+  /* Envio */
+  label.row { display: grid; gap: 0.25rem; margin-bottom: 1rem; }
+  label.row span { font-size: 0.88rem; font-weight: 500; }
+  input, select { padding: 0.45rem 0.55rem; border-radius: 8px; border: 1px solid var(--border); background: var(--bg); color: var(--fg); max-width: 22rem; }
+  .grid2 { display: grid; gap: 1rem; }
+  @media (min-width: 640px) { .grid2 { grid-template-columns: 1fr 1fr; } }
+  pre.ok { overflow: auto; font-size: 0.82rem; margin: 0; max-height: 45vh; }
+  button.submit {
+    padding: 0.55rem 1.2rem;
+    border-radius: 10px;
+    border: none;
+    background: var(--nav-active);
+    color: #fff;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  button.submit:hover { filter: brightness(1.08); }
+  .foot-mini {
+    margin-top: 2rem;
+    padding-top: 1rem;
+    border-top: 1px solid var(--border);
+    font-size: 0.85rem;
+    color: var(--muted);
+    text-align: center;
+  }
+  .foot-mini a { color: var(--nav-active); font-weight: 600; }
+  .candles-wrap .controls {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    align-items: center;
+    margin-bottom: 0.75rem;
+  }
+  .candles-wrap .controls input,
+  .candles-wrap .controls select {
+    max-width: 10rem;
+  }
+  .candles-wrap .controls select#candles-session-date {
+    max-width: min(18rem, 100%);
+    min-width: 11rem;
+  }
+  .candles-svg {
+    width: 100%;
+    height: clamp(240px, 38vh, 520px);
+    min-height: 220px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: var(--nav-bg);
+  }
+  .candles-volume-svg {
+    width: 100%;
+    height: clamp(100px, 17vh, 220px);
+    min-height: 95px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: var(--nav-bg);
+    margin-top: 0.75rem;
+  }
+  .candles-charts-shell {
+    position: relative;
+    margin-top: 0.35rem;
+  }
+  .candles-loading {
+    position: absolute;
+    inset: 0;
+    z-index: 2;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 0.65rem;
+    margin: 0;
+    padding: 1rem;
+    border-radius: 10px;
+    background: rgba(15, 23, 42, 0.42);
+    color: #e2e8f0;
+    font-size: 0.88rem;
+    font-weight: 600;
+    text-align: center;
+    backdrop-filter: blur(3px);
+    pointer-events: none;
+  }
+  .candles-loading[hidden] {
+    display: none !important;
+  }
+  .candles-loading-dot {
+    width: 26px;
+    height: 26px;
+    border: 3px solid rgba(96, 165, 250, 0.35);
+    border-top-color: #60a5fa;
+    border-radius: 50%;
+    animation: candles-loading-spin 0.65s linear infinite;
+  }
+  @keyframes candles-loading-spin {
+    to { transform: rotate(360deg); }
+  }
+  .candles-loading-text {
+    letter-spacing: 0.02em;
+  }
+  .market-chart-split {
+    display: grid;
+    gap: 0.9rem;
+    grid-template-columns: 1fr;
+    align-items: start;
+  }
+  @media (min-width: 1220px) {
+    .market-chart-split {
+      grid-template-columns: minmax(0, 1.45fr) clamp(285px, 22vw, 430px);
+      gap: 0.8rem;
+    }
+  }
+  @media (min-width: 1700px) {
+    .market-chart-split {
+      grid-template-columns: minmax(0, 1.75fr) clamp(290px, 19vw, 410px);
+      gap: 0.9rem;
+    }
+  }
+  .market-chart-split .candles-wrap {
+    margin-bottom: 0;
+  }
+  .market-chart-split .candles-wrap .section-h {
+    font-size: 1.22rem;
+  }
+  .market-chart-split .candles-wrap .sub {
+    margin-bottom: 0.55rem;
+  }
+  .market-chart-split .candles-wrap .controls {
+    gap: 0.35rem;
+    margin-bottom: 0.45rem;
+  }
+  .market-chart-split .candles-wrap .controls label {
+    font-size: 0.78rem;
+  }
+  .market-chart-split .candles-wrap .controls input,
+  .market-chart-split .candles-wrap .controls select {
+    padding: 0.26rem 0.38rem;
+    font-size: 0.76rem;
+    max-width: 8.5rem;
+  }
+  .market-chart-split .candles-wrap #candles-refresh {
+    padding: 0.34rem 0.7rem;
+    font-size: 0.76rem;
+  }
+  .market-chart-split .candles-wrap .hint {
+    font-size: 0.78rem;
+  }
+  .quote-compact-strip {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.45rem;
+    align-items: center;
+    margin-top: 0.3rem;
+    margin-bottom: 0.45rem;
+    font-size: 0.72rem;
+    color: #cbd5e1;
+  }
+  .quote-compact-strip .q-item {
+    display: inline-flex;
+    gap: 0.22rem;
+    align-items: center;
+    padding: 0.14rem 0.36rem;
+    border: 1px solid #1f2e4a;
+    border-radius: 999px;
+    background: rgba(15, 23, 42, 0.65);
+    white-space: nowrap;
+  }
+  .quote-compact-strip .q-k {
+    opacity: 0.78;
+  }
+  .quote-compact-strip .q-v {
+    font-weight: 700;
+    color: #e2e8f0;
+  }
+  .home-market-compact {
+    max-width: clamp(285px, 22vw, 430px);
+    width: 100%;
+    justify-self: end;
+  }
+  @media (min-width: 1700px) {
+    .home-market-compact {
+      max-width: clamp(290px, 19vw, 410px);
+    }
+  }
+  @media (max-width: 1219px) {
+    .home-market-compact {
+      max-width: 100%;
+      justify-self: stretch;
+    }
+  }
+  @media (min-width: 1220px) {
+    .home-market-compact {
+      position: sticky;
+      top: 0.65rem;
+    }
+  }
+  .home-market-compact .mp-toolbar {
+    display: block;
+    margin-bottom: 0.45rem;
+    padding: 0.3rem 0.34rem;
+    border-radius: 7px;
+  }
+  .home-market-compact .mp-toolbar .mp-form,
+  .home-market-compact .mp-toolbar form[action*="save_daytrade_candidates"],
+  .home-market-compact .mp-toolbar form[action*="save_watch_tickers"],
+  .home-market-compact .mp-toolbar .hint {
+    display: none !important;
+  }
+  .home-market-compact .mp-toolbar .mp-chips-block {
+    min-width: 0;
+  }
+  .home-market-compact .mp-toolbar .mp-chips-block > p {
+    margin: 0 0 0.16rem;
+    font-size: 0.68rem;
+  }
+  .home-market-compact .mp-toolbar .chips {
+    gap: 0.12rem;
+    margin-top: 0.1rem;
+  }
+  .home-market-compact .mp-toolbar .chips a {
+    font-size: 0.64rem;
+    padding: 0.05rem 0.28rem;
+    border-radius: 999px;
+    line-height: 1.05;
+  }
+  .home-market-compact .mp-cards-top {
+    display: none;
+  }
+  .home-market-compact .mp-lower,
+  .home-market-compact .mp-lower--books-only {
+    margin-top: 0;
+    grid-template-columns: 1fr;
+    gap: 0.6rem;
+  }
+  .home-market-compact section.panel {
+    padding: 0.38rem 0.42rem;
+    border-radius: 8px;
+  }
+  .home-market-compact section.panel h2 {
+    font-size: 0.8rem;
+    margin-bottom: 0.3rem;
+  }
+  .home-market-compact table.book-compact th,
+  .home-market-compact table.book-compact td {
+    padding: 0.1rem 0.14rem;
+    font-size: 0.68rem;
+  }
+  .home-market-compact .book-bid-price,
+  .home-market-compact .book-ask-price {
+    padding: 0.08rem 0.22rem;
+    border-radius: 7px;
+    font-size: 0.66rem;
+  }
+  #ordens table.data {
+    font-size: 0.78rem;
+  }
+  #ordens table.data th,
+  #ordens table.data td {
+    padding: 0.22rem 0.32rem;
+  }
+  #ordens .btn-cancel-order {
+    padding: 0.12rem 0.34rem;
+    font-size: 0.68rem;
+    border-radius: 6px;
+  }
+  #ordens .order-latest-badge {
+    margin-right: 0.2rem;
+    padding: 0.07rem 0.26rem;
+    font-size: 0.62rem;
+  }
+  /* Automações: logs no topo, gráfico abaixo (largura total) */
+  .automation-log-chart-focus {
+    display: grid;
+    gap: 0.85rem;
+    align-items: start;
+    margin-bottom: 1.5rem;
+    grid-template-columns: 1fr;
+  }
+  .automation-log-chart-focus #automation-logs,
+  .automation-log-chart-focus #mercado {
+    width: 100%;
+    min-width: 0;
+  }
+  .automation-mercado-highlight {
+    border: 2px solid rgba(37, 99, 235, 0.45);
+    border-radius: 18px;
+    padding: 0.75rem 0.85rem 1rem;
+    background: linear-gradient(180deg, rgba(37, 99, 235, 0.09) 0%, var(--nav-bg) 42%);
+    box-shadow: 0 10px 36px rgba(15, 23, 42, 0.14);
+  }
+  .automation-mercado-highlight .market-chart-split {
+    grid-template-columns: 1fr !important;
+    gap: 0.75rem !important;
+  }
+  .automation-mercado-highlight .home-market-compact {
+    max-width: 100%;
+    width: 100%;
+    justify-self: stretch;
+  }
+  @media (min-width: 1220px) {
+    .automation-mercado-highlight .home-market-compact .mp-lower,
+    .automation-mercado-highlight .home-market-compact .mp-lower--books-only {
+      grid-template-columns: 1fr 1fr;
+    }
+  }
+  .automation-mercado-highlight .candles-charts-shell {
+    min-height: min(52vh, 560px);
+  }
+  .automation-mercado-highlight .candles-svg {
+    height: clamp(300px, 48vh, 680px);
+    min-height: 280px;
+  }
+  .automation-mercado-highlight .candles-volume-svg {
+    height: clamp(110px, 16vh, 240px);
+    min-height: 100px;
+  }
+</style>
+{% endblock %}
+
+{% block content %}
+  {% if dashboard_locked %}
+    <div class="dash-hero">
+      <h1>{{ page_title }}</h1>
+      <p class="lead">Área restrita. Faça login para continuar.</p>
+    </div>
+    <div class="locked">
+      <p>Sessão protegida. Utilize as credenciais que você recebeu.</p>
+      <a href="{% url 'accounts:login' %}">Entrar</a>
+    </div>
+  {% else %}
+    {% if nav_section == 'automations' %}<div class="automation-log-chart-focus">{% endif %}
+    {% block dashboard_preface %}{% endblock %}
+    <section id="mercado" class="section-wrap{% if nav_section == 'automations' %} automation-mercado-highlight{% endif %}">
+      <div class="market-chart-split">
+        <section id="candles" class="section-wrap candles-wrap">
+          <h2 class="section-h">Candles e volume (histórico salvo)</h2>
+          <p class="sub">Agregado por intervalo usando snapshots persistidos de <code>Quote</code>.</p>
+          <div class="controls">
+            <label>Ticker <input type="text" id="candles-ticker" value="{{ ticker|default:default_ticker_js }}" maxlength="16" autocomplete="off"></label>
+            <label>Intervalo
+              <select id="candles-interval">
+                <option value="10s">10s</option>
+                <option value="30s">30s</option>
+                <option value="1m">1m</option>
+                <option value="5m">5m</option>
+                <option value="15m">15m</option>
+              </select>
+            </label>
+            <label style="max-width:none;">Dia (só dias com dados)
+              <select id="candles-session-date" title="Lista carregada do banco para este ticker. Últimos dados = sem filtrar o dia. Depois clique em Ver.">
+                <option value="">Últimos dados (ao vivo)</option>
+              </select>
+            </label>
+            <label>Tipo gráfico
+              <select id="candles-type">
+                <option value="candles">Candles</option>
+                <option value="line">Linha</option>
+                <option value="ohlc">OHLC</option>
+              </select>
+            </label>
+            <label style="display:flex;align-items:center;gap:0.3rem;max-width:none;">
+              <input type="checkbox" id="candles-vp-enabled" style="max-width:none;" checked>
+              Perfil de volume
+            </label>
+            <label style="display:flex;align-items:center;gap:0.3rem;max-width:none;">
+              <input type="checkbox" id="candles-vp-labels" style="max-width:none;" checked>
+              Números VP
+            </label>
+            <label style="display:flex;align-items:center;gap:0.3rem;max-width:none;">
+              <input type="checkbox" id="candles-vp-historical" style="max-width:none;">
+              VP acumulado histórico
+            </label>
+            <label>Bins VP
+              <select id="candles-vp-bins">
+                <option value="16">16</option>
+                <option value="24" selected>24</option>
+                <option value="32">32</option>
+                <option value="48">48</option>
+              </select>
+            </label>
+            <button type="button" class="submit" id="candles-refresh">Ver</button>
+          </div>
+          <div class="controls" style="margin-top:0.45rem;">
+            <span class="hint" id="candles-scroll-meta" style="margin-left:0.1rem;">Escolha o dia e clique em Ver. Arraste o gráfico para navegar no tempo; Shift + arraste desloca o eixo de preço.</span>
+          </div>
+          <div id="candles-quote-compact" class="quote-compact-strip" aria-live="polite">Carregando cotação...</div>
+          <div class="candles-charts-shell">
+            <div id="candles-loading" class="candles-loading" hidden role="status" aria-live="polite">
+              <span class="candles-loading-dot" aria-hidden="true"></span>
+              <span class="candles-loading-text">Carregando gráficos…</span>
+            </div>
+            <svg id="candles-svg" class="candles-svg" viewBox="0 0 960 280" preserveAspectRatio="xMidYMid meet" aria-label="Grafico de candles"></svg>
+            <svg id="candles-volume-svg" class="candles-volume-svg" viewBox="0 0 960 150" preserveAspectRatio="xMidYMid meet" aria-label="Grafico de volume"></svg>
+          </div>
+          <p class="hint" id="candles-meta" style="margin-top:0.6rem;">Carregando...</p>
+        </section>
+        <div class="home-market-compact">
+          {% include "trader/partials/market_panel.html" %}
+        </div>
+      </div>
+    </section>
+    {% if nav_section == 'automations' %}</div>{% endif %}
+
+    {% block dashboard_orders %}
+    <section id="ordens" class="section-wrap">
+      <h2 class="section-h">Ordens do dia</h2>
+      <p class="sub">Lista intraday atualizada pela API. <a href="{% url 'trader:orders_intraday' %}">Ver página só de ordens →</a></p>
+      <div id="orders-live-inner">
+        {% include "trader/partials/orders_panel.html" %}
+      </div>
+    </section>
+    {% endblock %}
+
+    <p class="foot-mini">Status API: <a href="/api/auth/status/">/api/auth/status/</a></p>
+  {% endif %}
+{% endblock %}
+
+{% block extra_js %}
+{% if not dashboard_locked and market_live_poll %}
+{% include "trader/partials/market_live_poll.html" %}
+{% endif %}
+{% if not dashboard_locked %}
+{% include "trader/partials/candles_volume.html" %}
+{% endif %}
+{% endblock %}

@@ -1,0 +1,18 @@
+[Unit]
+Description=Celery Beat — ENTRADE (agenda: collect_watch_quotes / gráficos)
+After=network.target
+# Broker: Redis. O Beat agenda tarefas; o worker executa.
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/home/APICLEAR/ENTRADE
+Environment="PATH=/home/APICLEAR/ENTRADE/.venv/bin:/usr/local/bin:/usr/bin"
+Environment="DJANGO_SETTINGS_MODULE=ENTRADE.settings"
+ExecStart=/home/APICLEAR/ENTRADE/.venv/bin/celery -A ENTRADE beat --loglevel=INFO
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

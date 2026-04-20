@@ -1,0 +1,355 @@
+{% extends "trader/base.html" %}
+{% block title %}{{ page_title }}{% endblock %}
+{% block extra_css %}
+<style>
+  .hint { color: var(--muted); font-size: 0.9rem; }
+  section.panel {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 1rem;
+    background: var(--nav-bg);
+    margin-top: 1rem;
+  }
+  table.data { width: 100%; border-collapse: collapse; font-size: 0.88rem; }
+  table.data th, table.data td { padding: 0.35rem 0.5rem; border-bottom: 1px solid var(--border); text-align: left; }
+  table.data th { font-weight: 600; }
+  h2.env-title { margin-top: 0; font-size: 1.05rem; }
+  .hist-tools { margin: 0.5rem 0 0; font-size: 0.9rem; }
+</style>
+{% endblock %}
+{% block content %}
+  <h1>Histórico de liquidações</h1>
+  {% if show_both_environments %}
+  <p class="hint">Exibindo <strong>simulador e real</strong>. <a href="{{ request.path }}">Mostrar só o ambiente ativo ({{ trading_environment_label }})</a></p>
+  {% else %}
+  <p class="hint">Exibindo apenas o ambiente <strong>{{ trading_environment_label }}</strong> (o selecionado na barra lateral + Aplicar). Para ver os dois ambientes juntos, use <a href="{{ request.path }}?all=1">ver simulador e real</a>.</p>
+  {% endif %}
+
+  <section class="panel">
+    {% if history_show_sim %}
+    <h2>Posições — Simulador (API / custódia)</h2>
+    <p class="hint hist-tools">Ledger alinhado às ordens enviadas à corretora no modo simulador ao vivo.</p>
+    <table class="data">
+      <thead>
+        <tr>
+          <th>Ativo</th>
+          <th>Lado</th>
+          <th>Qtd. aberta</th>
+          <th>Preço médio abertura</th>
+          <th>Aberta em</th>
+          <th>Encerrada em</th>
+          <th>Ativa</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for p in positions_sim %}
+        <tr>
+          <td>{{ p.ticker }}</td>
+          <td>{{ p.get_side_display }}</td>
+          <td>{{ p.quantity_open }}</td>
+          <td>{{ p.avg_open_price }}</td>
+          <td>{{ p.opened_at|date:"d/m/Y H:i" }}</td>
+          <td>{% if p.closed_at %}{{ p.closed_at|date:"d/m/Y H:i" }}{% else %}—{% endif %}</td>
+          <td>{% if p.is_active %}Sim{% else %}Não{% endif %}</td>
+        </tr>
+        {% empty %}
+        <tr><td colspan="7">Nenhum registro.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    <h2 class="env-title" style="margin-top:1.25rem;">Posições — Simulador (replay fictício)</h2>
+    <p class="hint hist-tools">Execuções só com preço das velas do dia histórico; não altera a custódia da API.</p>
+    <table class="data">
+      <thead>
+        <tr>
+          <th>Ativo</th>
+          <th>Lado</th>
+          <th>Qtd. aberta</th>
+          <th>Preço médio abertura</th>
+          <th>Aberta em</th>
+          <th>Encerrada em</th>
+          <th>Ativa</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for p in positions_sim_replay %}
+        <tr>
+          <td>{{ p.ticker }}</td>
+          <td>{{ p.get_side_display }}</td>
+          <td>{{ p.quantity_open }}</td>
+          <td>{{ p.avg_open_price }}</td>
+          <td>{{ p.opened_at|date:"d/m/Y H:i" }}</td>
+          <td>{% if p.closed_at %}{{ p.closed_at|date:"d/m/Y H:i" }}{% else %}—{% endif %}</td>
+          <td>{% if p.is_active %}Sim{% else %}Não{% endif %}</td>
+        </tr>
+        {% empty %}
+        <tr><td colspan="7">Nenhum registro.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% endif %}
+    {% if history_show_sim and history_show_real %}
+    <h2 class="env-title" style="margin-top:1.25rem;">Posições — Real</h2>
+    {% elif history_show_real %}
+    <h2>Posições — Real</h2>
+    {% endif %}
+    {% if history_show_real %}
+    <table class="data">
+      <thead>
+        <tr>
+          <th>Ativo</th>
+          <th>Lado</th>
+          <th>Qtd. aberta</th>
+          <th>Preço médio abertura</th>
+          <th>Aberta em</th>
+          <th>Encerrada em</th>
+          <th>Ativa</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for p in positions_real %}
+        <tr>
+          <td>{{ p.ticker }}</td>
+          <td>{{ p.get_side_display }}</td>
+          <td>{{ p.quantity_open }}</td>
+          <td>{{ p.avg_open_price }}</td>
+          <td>{{ p.opened_at|date:"d/m/Y H:i" }}</td>
+          <td>{% if p.closed_at %}{{ p.closed_at|date:"d/m/Y H:i" }}{% else %}—{% endif %}</td>
+          <td>{% if p.is_active %}Sim{% else %}Não{% endif %}</td>
+        </tr>
+        {% empty %}
+        <tr><td colspan="7">Nenhum registro.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% endif %}
+  </section>
+
+  <section class="panel">
+    {% if history_show_sim %}
+    <h2>Liquidações — Simulador (API)</h2>
+    <table class="data">
+      <thead>
+        <tr>
+          <th>Ativo</th>
+          <th>Modo</th>
+          <th>Direção</th>
+          <th>Quantidade</th>
+          <th>Preço</th>
+          <th>Executada em</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for l in liquidations_sim %}
+        <tr>
+          <td>{{ l.position.ticker }}</td>
+          <td>{{ l.get_mode_display }}</td>
+          <td>{{ l.get_direction_display }}</td>
+          <td>{{ l.quantity }}</td>
+          <td>{{ l.price }}</td>
+          <td>{{ l.executed_at|date:"d/m/Y H:i" }}</td>
+        </tr>
+        {% empty %}
+        <tr><td colspan="6">Nenhum registro.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    <h2 class="env-title" style="margin-top:1.25rem;">Liquidações — Simulador (replay fictício)</h2>
+    <table class="data">
+      <thead>
+        <tr>
+          <th>Ativo</th>
+          <th>Modo</th>
+          <th>Direção</th>
+          <th>Quantidade</th>
+          <th>Preço</th>
+          <th>Executada em</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for l in liquidations_sim_replay %}
+        <tr>
+          <td>{{ l.position.ticker }}</td>
+          <td>{{ l.get_mode_display }}</td>
+          <td>{{ l.get_direction_display }}</td>
+          <td>{{ l.quantity }}</td>
+          <td>{{ l.price }}</td>
+          <td>{{ l.executed_at|date:"d/m/Y H:i" }}</td>
+        </tr>
+        {% empty %}
+        <tr><td colspan="6">Nenhum registro.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% endif %}
+    {% if history_show_sim and history_show_real %}
+    <h2 class="env-title" style="margin-top:1.25rem;">Liquidações — Real</h2>
+    {% elif history_show_real %}
+    <h2>Liquidações — Real</h2>
+    {% endif %}
+    {% if history_show_real %}
+    <table class="data">
+      <thead>
+        <tr>
+          <th>Ativo</th>
+          <th>Modo</th>
+          <th>Direção</th>
+          <th>Quantidade</th>
+          <th>Preço</th>
+          <th>Executada em</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for l in liquidations_real %}
+        <tr>
+          <td>{{ l.position.ticker }}</td>
+          <td>{{ l.get_mode_display }}</td>
+          <td>{{ l.get_direction_display }}</td>
+          <td>{{ l.quantity }}</td>
+          <td>{{ l.price }}</td>
+          <td>{{ l.executed_at|date:"d/m/Y H:i" }}</td>
+        </tr>
+        {% empty %}
+        <tr><td colspan="6">Nenhum registro.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% endif %}
+  </section>
+
+  <section class="panel">
+    {% if history_show_sim %}
+    <h2>Operações finalizadas — Simulador (API)</h2>
+    <table class="data">
+      <thead>
+        <tr>
+          <th>Ativo</th>
+          <th>Tipo PnL</th>
+          <th>PnL bruto</th>
+          <th>Taxas</th>
+          <th>PnL líquido</th>
+          <th>Fechada em</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for o in closed_operations_sim %}
+        <tr>
+          <td>{{ o.position.ticker }}</td>
+          <td>{{ o.get_pnl_type_display }}</td>
+          <td>{{ o.gross_pnl }}</td>
+          <td>{{ o.fees }}</td>
+          <td>{{ o.net_pnl }}</td>
+          <td>{{ o.closed_at|date:"d/m/Y H:i" }}</td>
+        </tr>
+        {% empty %}
+        <tr><td colspan="6">Nenhum registro.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    <h2 class="env-title" style="margin-top:1.25rem;">Operações finalizadas — Simulador (replay fictício)</h2>
+    <table class="data">
+      <thead>
+        <tr>
+          <th>Ativo</th>
+          <th>Tipo PnL</th>
+          <th>PnL bruto</th>
+          <th>Taxas</th>
+          <th>PnL líquido</th>
+          <th>Fechada em</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for o in closed_operations_sim_replay %}
+        <tr>
+          <td>{{ o.position.ticker }}</td>
+          <td>{{ o.get_pnl_type_display }}</td>
+          <td>{{ o.gross_pnl }}</td>
+          <td>{{ o.fees }}</td>
+          <td>{{ o.net_pnl }}</td>
+          <td>{{ o.closed_at|date:"d/m/Y H:i" }}</td>
+        </tr>
+        {% empty %}
+        <tr><td colspan="6">Nenhum registro.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% endif %}
+    {% if history_show_sim and history_show_real %}
+    <h2 class="env-title" style="margin-top:1.25rem;">Operações finalizadas — Real</h2>
+    {% elif history_show_real %}
+    <h2>Operações finalizadas — Real</h2>
+    {% endif %}
+    {% if history_show_real %}
+    <table class="data">
+      <thead>
+        <tr>
+          <th>Ativo</th>
+          <th>Tipo PnL</th>
+          <th>PnL bruto</th>
+          <th>Taxas</th>
+          <th>PnL líquido</th>
+          <th>Fechada em</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for o in closed_operations_real %}
+        <tr>
+          <td>{{ o.position.ticker }}</td>
+          <td>{{ o.get_pnl_type_display }}</td>
+          <td>{{ o.gross_pnl }}</td>
+          <td>{{ o.fees }}</td>
+          <td>{{ o.net_pnl }}</td>
+          <td>{{ o.closed_at|date:"d/m/Y H:i" }}</td>
+        </tr>
+        {% empty %}
+        <tr><td colspan="6">Nenhum registro.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% endif %}
+  </section>
+
+  {% if history_show_sim %}
+  <section class="panel">
+    <h2>Marcações no simulador — replay vs ao vivo</h2>
+    <p class="hint hist-tools">
+      Registos locais do app: separação entre execuções em <strong>replay</strong> (robôs em dia histórico)
+      e uso direto da <strong>API</strong> (boleta de teste, liquidação, pregão ao vivo). A tabela única de custódia no painel continua espelhando a conta simulada na corretora.
+    </p>
+    {% include "trader/partials/custody_simulator_activity.html" %}
+  </section>
+  {% endif %}
+
+  {% if show_both_environments %}
+  <section class="panel">
+    <h2>Marcações no gráfico (compra/venda)</h2>
+    <p class="hint hist-tools">Lista misturada; disponível ao visualizar os dois ambientes.</p>
+    <table class="data">
+      <thead>
+        <tr>
+          <th>Ativo</th>
+          <th>Lado</th>
+          <th>Quantidade</th>
+          <th>Preço</th>
+          <th>Origem</th>
+          <th>Marcada em</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for m in trade_markers %}
+        <tr>
+          <td>{{ m.ticker }}</td>
+          <td>{{ m.get_side_display }}</td>
+          <td>{{ m.quantity }}</td>
+          <td>{% if m.price %}{{ m.price }}{% else %}—{% endif %}</td>
+          <td>{{ m.source|default:"—" }}</td>
+          <td>{{ m.marker_at|date:"d/m/Y H:i" }}</td>
+        </tr>
+        {% empty %}
+        <tr><td colspan="6">Nenhum registro.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </section>
+  {% endif %}
+{% endblock %}

@@ -1,0 +1,169 @@
+{% load site_extras %}
+<section class="api-data-card api-data-card--custody" aria-label="Custódia">
+  <div class="api-data-card__bar">
+    <strong class="api-data-card__title">Custódia</strong>
+    {% with d=api_custody_display %}
+    {% if d.total_net_value_brl %}
+      <span class="api-data-card__meta">Total líquido (API): R$ {{ d.total_net_value_brl }}</span>
+    {% endif %}
+    {% if d.total_pnl_brl %}
+      <span class="api-data-card__meta">Resultado total (API): R$ {{ d.total_pnl_brl }}</span>
+    {% endif %}
+    {% if d.liquidation_enabled_count %}
+      <form method="post" action="{% url 'trader:liquidate_all_assets' %}" style="display:inline-flex; margin-left: .5rem;">
+        {% csrf_token %}
+        <input type="hidden" name="next" value="{{ request.get_full_path }}">
+        <button type="submit" class="btn-cancel-order">Liquidar todos</button>
+      </form>
+    {% endif %}
+    <a href="{% url 'trader:liquidation_history' %}" class="btn-cancel-order" style="margin-left:.5rem; text-decoration:none;">Ver histórico</a>
+    {% endwith %}
+  </div>
+  {% if trading_environment_is_simulator and replay_shadow_custody_panel.show %}
+  <style>
+    .custody-dual { margin-top: 0.45rem; }
+    .custody-dual__radios { position: absolute; opacity: 0; width: 0; height: 0; pointer-events: none; }
+    .custody-dual__labels {
+      display: inline-flex; flex-wrap: wrap; gap: 0.35rem; margin-bottom: 0.45rem;
+    }
+    .custody-dual__labels label {
+      padding: 0.2rem 0.55rem; border-radius: 999px; border: 1px solid var(--border);
+      font-size: 0.72rem; cursor: pointer; background: var(--bg); color: var(--muted);
+    }
+    .custody-dual #custody-src-api:checked ~ .custody-dual__labels label[for="custody-src-api"],
+    .custody-dual #custody-src-replay:checked ~ .custody-dual__labels label[for="custody-src-replay"] {
+      border-color: var(--nav-active); color: var(--fg); font-weight: 600;
+    }
+    .custody-dual .custody-dual__panel { display: none; margin-top: 0.15rem; }
+    .custody-dual #custody-src-api:checked ~ .custody-dual__panel--api { display: block; }
+    .custody-dual #custody-src-replay:checked ~ .custody-dual__panel--replay { display: block; }
+    .custody-dual #custody-src-replay:checked ~ .custody-dual__panel--api { display: none !important; }
+    .custody-dual #custody-src-api:checked ~ .custody-dual__panel--replay { display: none !important; }
+    .custody-dual__hint {
+      font-size: 0.68rem; color: var(--muted); margin: 0 0 0.35rem; line-height: 1.35;
+    }
+    .custody-replay-table { width: 100%; border-collapse: collapse; font-size: 0.82rem; }
+    .custody-replay-table th, .custody-replay-table td {
+      padding: 0.3rem 0.45rem; border-bottom: 1px solid var(--border); text-align: left;
+    }
+    .custody-replay-table th { font-weight: 600; }
+    .replay-pnl-pos { color: #34d399; }
+    .replay-pnl-neg { color: #f87171; }
+    .custody-replay-toolbar { display: flex; flex-wrap: wrap; gap: 0.35rem; align-items: center; margin-bottom: 0.35rem; }
+    .custody-replay-history-dialog { max-width: min(96vw, 42rem); border: 1px solid var(--border); border-radius: 8px; padding: 0; background: var(--bg); color: var(--fg); }
+    .custody-replay-history-dialog::backdrop { background: rgba(0,0,0,0.45); }
+    .custody-replay-history-dialog header { padding: 0.55rem 0.75rem; border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; align-items: center; gap: 0.5rem; }
+    .custody-replay-history-dialog .dialog-body { padding: 0.5rem 0.75rem 0.75rem; max-height: 70vh; overflow: auto; }
+  </style>
+  <div class="custody-dual" id="custody-dual-wrap">
+    <p class="custody-dual__hint">
+      <strong>Corretora</strong> = conta simulada na API (tempo real e ordens reais na simulação).
+      <strong>Replay fictício</strong> = posições só com preço das velas do dia histórico (sem envio à API).
+    </p>
+    <input class="custody-dual__radios" type="radio" name="custody-dual-src" id="custody-src-api" value="api" checked>
+    <input class="custody-dual__radios" type="radio" name="custody-dual-src" id="custody-src-replay" value="replay">
+    <div class="custody-dual__labels">
+      <label for="custody-src-api">Corretora (tempo real)</label>
+      <label for="custody-src-replay">Replay fictício</label>
+    </div>
+    <div class="custody-dual__panel custody-dual__panel--api">
+      {% include "trader/partials/custody_api_table_body.html" %}
+    </div>
+    <div class="custody-dual__panel custody-dual__panel--replay">
+      <div class="custody-replay-toolbar">
+        <button type="button" class="btn-cancel-order" id="custody-replay-pnl-history-open">Histórico P/L (replay)</button>
+        {% if not replay_shadow_custody_panel.empty_history %}
+        <span class="api-data-card__meta" style="font-size:0.68rem;">{{ replay_shadow_custody_panel.history_full_count }} encerrada(s) no total</span>
+        {% endif %}
+      </div>
+      {% if replay_shadow_custody_panel.active_unreal_total_show %}
+      <p class="api-data-card__meta" style="margin:0 0 0.35rem;font-size:0.74rem;">
+        <strong>P/L não real. (replay, todas abertas):</strong>
+        <span class="{{ replay_shadow_custody_panel.active_unreal_total_class }}">{{ replay_shadow_custody_panel.active_unreal_total_str }}</span>
+      </p>
+      {% endif %}
+      <dialog class="custody-replay-history-dialog" id="custody-replay-pnl-history-dialog" aria-labelledby="custody-replay-pnl-history-title">
+        <header>
+          <strong id="custody-replay-pnl-history-title">Histórico P/L — replay fictício</strong>
+          <button type="button" class="btn-cancel-order" id="custody-replay-pnl-history-close" value="cancel">Fechar</button>
+        </header>
+        <div class="dialog-body">
+          {% if not replay_shadow_custody_panel.empty_history %}
+          <p class="api-data-card__meta" style="margin:0 0 0.45rem;font-size:0.78rem;">
+            <strong>Total P/L líquido (todas as liquidações):</strong>
+            <span class="{{ replay_shadow_custody_panel.history_net_total_all_class }}">{{ replay_shadow_custody_panel.history_net_total_all_str }}</span>
+            {% if replay_shadow_custody_panel.history_full_count > replay_shadow_custody_panel.history_rows|length %}
+            <span class="hint"> — últimas {{ replay_shadow_custody_panel.history_rows|length }} linhas.</span>
+            {% endif %}
+          </p>
+          {% endif %}
+          {% if replay_shadow_custody_panel.empty_history %}
+            <p class="api-data-card__empty">Nenhuma posição liquidada registada no ledger de replay.</p>
+          {% else %}
+            <table class="custody-replay-table api-data-table api-data-table--compact">
+              <thead>
+                <tr>
+                  <th>Ativo</th>
+                  <th>Lado</th>
+                  <th>PM ref.</th>
+                  <th>P/L líquido</th>
+                  <th>Encerrada em</th>
+                </tr>
+              </thead>
+              <tbody>
+                {% for h in replay_shadow_custody_panel.history_rows %}
+                <tr>
+                  <td>{{ h.ticker }}</td>
+                  <td>{{ h.side }}</td>
+                  <td>{{ h.ref_price_str }}</td>
+                  <td class="{{ h.pnl_class }}">{{ h.net_pnl_str }}</td>
+                  <td>{{ h.closed_at|date:"d/m H:i" }}</td>
+                </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          {% endif %}
+        </div>
+      </dialog>
+      {% if replay_shadow_custody_panel.empty_active %}
+        <p class="api-data-card__empty">Nenhuma posição aberta no ledger de replay.</p>
+      {% else %}
+        <div class="api-data-card__scroll">
+          <table class="custody-replay-table api-data-table api-data-table--compact">
+            <thead>
+              <tr>
+                <th>Ativo</th>
+                <th>Lado</th>
+                <th>Qtd.</th>
+                <th>PM abertura</th>
+                <th>Preço (replay)</th>
+                <th>Var. %</th>
+                <th>P/L não real.</th>
+                <th>Estado</th>
+                <th>Aberta em</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for r in replay_shadow_custody_panel.active_rows %}
+              <tr>
+                <td>{{ r.ticker }}</td>
+                <td>{{ r.side }}</td>
+                <td>{{ r.quantity_open_str }}</td>
+                <td>{{ r.ref_price_str }}</td>
+                <td>{{ r.mark_price_str }}</td>
+                <td class="{{ r.pnl_class }}">{{ r.var_pct_str }}</td>
+                <td class="{{ r.pnl_class }}">{{ r.unreal_str }}</td>
+                <td>{{ r.status_label }}</td>
+                <td>{{ r.opened_at|date:"d/m H:i" }}</td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      {% endif %}
+    </div>
+  </div>
+  {% else %}
+  {% include "trader/partials/custody_api_table_body.html" %}
+  {% endif %}
+</section>

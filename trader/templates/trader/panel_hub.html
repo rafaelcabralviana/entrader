@@ -1,0 +1,122 @@
+{% extends "trader/base.html" %}
+{% block title %}{{ page_title }}{% endblock %}
+{% block extra_css %}
+<style>
+  .hub-wrap {
+    max-width: 52rem;
+    margin: 0 auto;
+  }
+  .hub-head {
+    margin-bottom: 1.5rem;
+  }
+  .hub-head h1 {
+    margin: 0 0 0.35rem;
+    font-size: clamp(1.35rem, 3vw, 1.75rem);
+    font-weight: 800;
+    letter-spacing: -0.03em;
+  }
+  .hub-head p {
+    margin: 0;
+    color: var(--muted);
+    font-size: 0.95rem;
+    line-height: 1.45;
+    max-width: 36rem;
+  }
+  .hub-grid {
+    display: grid;
+    gap: 1rem;
+    grid-template-columns: 1fr;
+  }
+  @media (min-width: 640px) {
+    .hub-grid { grid-template-columns: 1fr 1fr; }
+  }
+  a.hub-card {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    text-align: left;
+    text-decoration: none;
+    color: inherit;
+    padding: 1.35rem 1.25rem 1.4rem;
+    border-radius: 16px;
+    border: 1px solid var(--border);
+    background: var(--nav-bg);
+    box-shadow: var(--shadow);
+    transition: border-color 0.15s ease, box-shadow 0.15s ease, transform 0.12s ease;
+    min-height: 9.5rem;
+  }
+  a.hub-card:hover {
+    border-color: var(--nav-active);
+    box-shadow: 0 4px 14px rgba(15, 23, 42, 0.1);
+    transform: translateY(-1px);
+  }
+  a.hub-card:focus-visible {
+    outline: 2px solid var(--nav-active);
+    outline-offset: 2px;
+  }
+  .hub-card-ico {
+    width: 2.5rem;
+    height: 2.5rem;
+    border-radius: 12px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 1.25rem;
+    margin-bottom: 0.85rem;
+  }
+  a.hub-card--manual .hub-card-ico {
+    background: var(--accent-soft);
+    color: var(--accent);
+  }
+  a.hub-card--auto .hub-card-ico {
+    background: rgba(124, 58, 237, 0.12);
+    color: #7c3aed;
+  }
+  @media (prefers-color-scheme: dark) {
+    a.hub-card--auto .hub-card-ico {
+      background: rgba(167, 139, 250, 0.12);
+      color: #a78bfa;
+    }
+  }
+  .hub-card h2 {
+    margin: 0 0 0.35rem;
+    font-size: 1.1rem;
+    font-weight: 700;
+  }
+  .hub-card p {
+    margin: 0;
+    font-size: 0.88rem;
+    color: var(--muted);
+    line-height: 1.45;
+    flex: 1;
+  }
+  .hub-card .hub-go {
+    margin-top: 1rem;
+    font-size: 0.82rem;
+    font-weight: 600;
+    color: var(--nav-active);
+  }
+</style>
+{% endblock %}
+{% block content %}
+<div class="hub-wrap">
+  <header class="hub-head">
+    <h1>Onde deseja operar?</h1>
+    <p>Escolha o ambiente manual (boleta e painel) ou o painel de automações.</p>
+  </header>
+  <div class="hub-grid">
+    <a class="hub-card hub-card--manual" href="{% url 'trader:home' %}">
+      <span class="hub-card-ico" aria-hidden="true">✎</span>
+      <h2>Ambiente manual</h2>
+      <p>Mercado ao vivo, boleta, ordens do dia e envio de teste — operação direta.</p>
+      <span class="hub-go">Abrir painel manual →</span>
+    </a>
+    <a class="hub-card hub-card--auto" href="{% url 'trader:automations_dashboard' %}">
+      <span class="hub-card-ico" aria-hidden="true">⚙</span>
+      <h2>Automação</h2>
+      <p>Estratégias, simulação de mercado e acompanhamento do motor de automações.</p>
+      <span class="hub-go">Abrir automações →</span>
+    </a>
+  </div>
+</div>
+{% endblock %}

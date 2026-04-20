@@ -1,0 +1,3 @@
+systemctl restart gunicorn-en
+
+systemctl retart celery-entrade-worker celery-entrade-beat

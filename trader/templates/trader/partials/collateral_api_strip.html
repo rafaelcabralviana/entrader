@@ -1,0 +1,35 @@
+<section class="api-data-card api-data-card--collateral" aria-label="Garantias">
+  <div class="api-data-card__bar">
+    <strong class="api-data-card__title">Garantias</strong>
+  </div>
+  {% with d=api_collateral_display %}
+  {% if d.error %}
+    <p class="api-data-card__err">{{ d.error }}</p>
+  {% elif d.pending %}
+    <p class="api-data-card__empty" aria-busy="true">Carregando…</p>
+  {% elif d.empty %}
+    <p class="api-data-card__empty">Nenhum registro.</p>
+  {% elif d.keys %}
+    <div class="api-data-card__scroll">
+      <table class="api-data-table">
+        <thead>
+          <tr>
+            {% if d.key_labels %}
+              {% for label in d.key_labels %}<th scope="col">{{ label }}</th>{% endfor %}
+            {% else %}
+              {% for k in d.keys %}<th scope="col">{{ k }}</th>{% endfor %}
+            {% endif %}
+          </tr>
+        </thead>
+        <tbody>
+          {% for row in d.rows %}
+          <tr>{% for cell in row %}<td>{{ cell }}</td>{% endfor %}</tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  {% elif d.pre %}
+    <pre class="api-data-pre">{{ d.pre }}</pre>
+  {% endif %}
+  {% endwith %}
+</section>

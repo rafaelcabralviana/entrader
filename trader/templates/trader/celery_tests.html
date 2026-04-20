@@ -1,0 +1,166 @@
+{% extends "trader/base.html" %}
+{% block title %}{{ page_title }}{% endblock %}
+{% block extra_css %}
+<style>
+  .panel {
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    background: var(--nav-bg);
+    padding: 1rem;
+    margin-bottom: 1rem;
+  }
+  .panel h2 { margin: 0 0 0.6rem; font-size: 1.02rem; }
+  .hint { color: var(--muted); font-size: 0.9rem; margin: 0.25rem 0 0.75rem; }
+  .grid-dl {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    gap: 0.3rem 1rem;
+    margin: 0;
+  }
+  .quotes-grid {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 0.85rem;
+  }
+  @media (min-width: 980px) {
+    .quotes-grid {
+      grid-template-columns: 1fr 1fr;
+    }
+  }
+  @media (min-width: 1400px) {
+    .quotes-grid {
+      grid-template-columns: 1fr 1fr 1fr;
+    }
+  }
+  .quote-card {
+    margin: 0;
+  }
+  .quote-card h3 {
+    margin: 0 0 0.55rem;
+    font-size: 1rem;
+    font-weight: 800;
+  }
+</style>
+{% endblock %}
+{% block content %}
+<section class="panel">
+  <h2>Monitoramento Celery (QuoteSnapshot + BookSnapshot)</h2>
+  <p class="hint">Dados locais salvos pelo Celery para os ativos monitorados (atualização automática em tempo real).</p>
+  <dl class="grid-dl" id="celery-tests-meta">
+    <dt>Tickers monitorados</dt><dd id="ct-watched-count">{{ watched_count }}</dd>
+    <dt>Lista atual</dt><dd id="ct-watch-list">{% if watch_tickers_text %}{{ watch_tickers_text }}{% else %}—{% endif %}</dd>
+    <dt>Última leitura</dt><dd id="ct-last-refresh">{{ server_time_brt|default:"—" }}</dd>
+    <dt>Fonte</dt><dd>Banco local (`QuoteSnapshot` e `BookSnapshot`) preenchido pela task `collect_watch_quotes`.</dd>
+  </dl>
+</section>
+
+<section class="panel">
+  <h2>Cotação local por ticker</h2>
+  <p class="hint">Mesmo padrão da página principal, mas usando apenas snapshots locais salvos pelo Celery.</p>
+  <div class="quotes-grid" id="ct-summary-body">
+    {% for r in summary_rows %}
+    <section class="panel quote-card">
+      <h3>{{ r.ticker }}</h3>
+      <dl class="grid-dl">
+        <dt>Ticker</dt><dd>{{ r.ticker|default:"—" }}</dd>
+        <dt>Último</dt><dd>{{ r.last_price|default:"—" }}</dd>
+        <dt>Último vol.</dt><dd>{{ r.last_qty|default:"—" }}</dd>
+        <dt>Status</dt><dd>{{ r.last_status|default:"—" }}</dd>
+        <dt>Abertura</dt><dd>{{ r.open|default:"—" }}</dd>
+        <dt>Máxima</dt><dd>{{ r.high|default:"—" }}</dd>
+        <dt>Mínima</dt><dd>{{ r.low|default:"—" }}</dd>
+        <dt>Fechamento</dt><dd>{{ r.close|default:"—" }}</dd>
+        <dt>Negócio (BRT)</dt><dd>{{ r.quote_at_brt|default:"—" }}</dd>
+        <dt>Capturado em (BRT)</dt><dd>{{ r.captured_at_brt|default:"—" }}</dd>
+        <dt>Book bids</dt><dd>{{ r.book_bid_count|default:"0" }}</dd>
+        <dt>Book asks</dt><dd>{{ r.book_ask_count|default:"0" }}</dd>
+        <dt>Melhor compra</dt><dd>{{ r.best_bid_price|default:"—" }}</dd>
+        <dt>Melhor venda</dt><dd>{{ r.best_ask_price|default:"—" }}</dd>
+        <dt>Book capturado (BRT)</dt><dd>{{ r.book_captured_at_brt|default:"—" }}</dd>
+      </dl>
+    </section>
+    {% empty %}
+    <p>Nenhum ticker monitorado.</p>
+    {% endfor %}
+  </div>
+</section>
+
+{% endblock %}
+
+{% block extra_js %}
+<script>
+(function() {
+  var endpoint = "{% url 'trader:celery_tests_json' %}";
+  var POLL_MS = 250;
+  var metaCount = document.getElementById('ct-watched-count');
+  var metaList = document.getElementById('ct-watch-list');
+  var metaRefresh = document.getElementById('ct-last-refresh');
+  var summaryBody = document.getElementById('ct-summary-body');
+  if (!metaCount || !metaList || !metaRefresh || !summaryBody) return;
+
+  function esc(v) {
+    return String(v == null || v === '' ? '—' : v)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;');
+  }
+
+  function renderSummary(rows) {
+    if (!rows || !rows.length) {
+      summaryBody.innerHTML = '<p>Nenhum ticker monitorado.</p>';
+      return;
+    }
+    var out = '';
+    for (var i = 0; i < rows.length; i++) {
+      var r = rows[i] || {};
+      out += '<section class="panel quote-card">' +
+        '<h3>' + esc(r.ticker) + '</h3>' +
+        '<dl class="grid-dl">' +
+        '<dt>Ticker</dt><dd>' + esc(r.ticker) + '</dd>' +
+        '<dt>Último</dt><dd>' + esc(r.last_price) + '</dd>' +
+        '<dt>Último vol.</dt><dd>' + esc(r.last_qty) + '</dd>' +
+        '<dt>Status</dt><dd>' + esc(r.last_status) + '</dd>' +
+        '<dt>Abertura</dt><dd>' + esc(r.open) + '</dd>' +
+        '<dt>Máxima</dt><dd>' + esc(r.high) + '</dd>' +
+        '<dt>Mínima</dt><dd>' + esc(r.low) + '</dd>' +
+        '<dt>Fechamento</dt><dd>' + esc(r.close) + '</dd>' +
+        '<dt>Negócio (BRT)</dt><dd>' + esc(r.quote_at_brt || r.quote_at) + '</dd>' +
+        '<dt>Capturado em (BRT)</dt><dd>' + esc(r.captured_at_brt || r.captured_at) + '</dd>' +
+        '<dt>Book bids</dt><dd>' + esc(r.book_bid_count) + '</dd>' +
+        '<dt>Book asks</dt><dd>' + esc(r.book_ask_count) + '</dd>' +
+        '<dt>Melhor compra</dt><dd>' + esc(r.best_bid_price) + '</dd>' +
+        '<dt>Melhor venda</dt><dd>' + esc(r.best_ask_price) + '</dd>' +
+        '<dt>Book capturado (BRT)</dt><dd>' + esc(r.book_captured_at_brt || r.book_captured_at) + '</dd>' +
+        '</dl>' +
+        '</section>';
+    }
+    summaryBody.innerHTML = out;
+  }
+
+  function load() {
+    var url = endpoint + '?_ts=' + Date.now();
+    return fetch(url, {
+      cache: 'no-store',
+      credentials: 'same-origin',
+      headers: { 'Accept': 'application/json' }
+    })
+      .then(function(r) {
+        if (!r.ok) throw new Error('http ' + r.status);
+        return r.json();
+      })
+      .then(function(data) {
+        metaCount.textContent = String(data.watched_count || 0);
+        metaList.textContent = data.watch_tickers_text || '—';
+        metaRefresh.textContent = data.server_time_brt || '—';
+        renderSummary(data.summary_rows || []);
+      })
+      .catch(function() {});
+  }
+
+  load();
+  setInterval(function() {
+    if (document.visibilityState === 'visible') load();
+  }, POLL_MS);
+})();
+</script>
+{% endblock %}

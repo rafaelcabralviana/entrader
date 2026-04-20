@@ -1,0 +1,942 @@
+{% extends "trader/home.html" %}
+{% block title %}Automações{% endblock %}
+{% block extra_css %}
+{{ block.super }}
+<style>
+  .replay-pnl-pos { color: #34d399; }
+  .replay-pnl-neg { color: #f87171; }
+  .automation-hero {
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    padding: 1.1rem 1.15rem 1.15rem;
+    margin-bottom: 1.35rem;
+    background: var(--nav-bg);
+    box-shadow: var(--shadow);
+  }
+  .automation-hero h2 {
+    margin: 0 0 0.35rem;
+    font-size: 1.12rem;
+    font-weight: 800;
+    letter-spacing: -0.02em;
+  }
+  .automation-hero .sub {
+    margin: 0 0 0.85rem;
+    font-size: 0.88rem;
+    color: var(--muted);
+    max-width: 44rem;
+    line-height: 1.45;
+  }
+  .automation-env-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    font-size: 0.72rem;
+    font-weight: 800;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    padding: 0.2rem 0.55rem;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    margin-bottom: 0.75rem;
+    background: var(--bg);
+  }
+  .strategy-grid {
+    display: grid;
+    gap: 0.65rem;
+  }
+  @media (min-width: 720px) {
+    .strategy-grid { grid-template-columns: 1fr 1fr; }
+  }
+  .strategy-card {
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 0.75rem 0.85rem;
+    background: var(--bg);
+    display: flex;
+    gap: 0.75rem;
+    align-items: flex-start;
+  }
+  .strategy-card input[type="checkbox"] {
+    margin-top: 0.2rem;
+    width: 1.05rem;
+    height: 1.05rem;
+    flex-shrink: 0;
+  }
+  .strategy-card .body { min-width: 0; }
+  .strategy-card h3 {
+    margin: 0 0 0.25rem;
+    font-size: 0.95rem;
+    font-weight: 700;
+  }
+  .strategy-card p {
+    margin: 0;
+    font-size: 0.82rem;
+    color: var(--muted);
+    line-height: 1.4;
+  }
+  .automation-actions {
+    margin-top: 0.85rem;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    align-items: center;
+  }
+  .automation-actions .hint { margin: 0; font-size: 0.82rem; }
+  .automation-thoughts-wrap {
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    padding: 1rem 1.05rem 1.05rem;
+    margin-bottom: 1.35rem;
+    background: var(--nav-bg);
+    box-shadow: var(--shadow);
+  }
+  .automation-thoughts-wrap > h2 {
+    margin: 0 0 0.35rem;
+    font-size: 1.12rem;
+    font-weight: 800;
+    letter-spacing: -0.02em;
+  }
+  .automation-thoughts-wrap .thought-lead {
+    margin: 0 0 0.65rem;
+    font-size: 0.86rem;
+    color: var(--muted);
+    line-height: 1.45;
+    max-width: 48rem;
+  }
+  .automation-thoughts-scroll {
+    max-height: min(42vh, 360px);
+    overflow: auto;
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    background: var(--bg);
+    padding: 0.35rem 0.5rem;
+  }
+  .automation-log-chart-focus .automation-thoughts-scroll {
+    max-height: min(16vh, 140px);
+    padding: 0.22rem 0.35rem;
+    border-radius: 8px;
+  }
+  .automation-log-chart-focus .automation-thoughts-wrap--tight {
+    padding: 0.42rem 0.5rem 0.48rem !important;
+    border-radius: 10px !important;
+  }
+  .automation-log-chart-focus .automation-thoughts-wrap > h2.section-h {
+    font-size: 0.82rem !important;
+    font-weight: 700 !important;
+    margin-bottom: 0.2rem !important;
+    letter-spacing: 0.02em;
+    text-transform: uppercase;
+  }
+  .automation-log-chart-focus .thought-lead--short {
+    margin-bottom: 0.28rem !important;
+    font-size: 0.65rem !important;
+    line-height: 1.3 !important;
+  }
+  .automation-log-chart-focus .thought-line {
+    font-size: 0.7rem !important;
+    line-height: 1.28 !important;
+    padding: 0.22rem 0.28rem !important;
+    gap: 0.25rem 0.45rem !important;
+  }
+  .automation-log-chart-focus .thought-time {
+    font-size: 0.64rem !important;
+  }
+  .automation-log-chart-focus .thought-src {
+    font-size: 0.58rem !important;
+    padding: 0.06rem 0.26rem !important;
+    max-width: 7.5rem;
+  }
+  .automation-thoughts-scroll ul {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+  }
+  .thought-line {
+    font-size: 0.82rem;
+    line-height: 1.45;
+    padding: 0.38rem 0.35rem;
+    border-bottom: 1px solid var(--border);
+    display: grid;
+    grid-template-columns: auto minmax(9rem, 14rem) 1fr;
+    gap: 0.35rem 0.65rem;
+    align-items: start;
+  }
+  .thought-line:last-child { border-bottom: none; }
+  .thought-line.thought-empty {
+    grid-template-columns: 1fr;
+    color: var(--muted);
+    font-style: italic;
+  }
+  .thought-time {
+    font-variant-numeric: tabular-nums;
+    color: var(--muted);
+    font-size: 0.76rem;
+    white-space: nowrap;
+  }
+  .thought-origin {
+    display: flex;
+    flex-direction: column;
+    gap: 0.14rem;
+    min-width: 0;
+  }
+  .thought-src-title {
+    font-size: 0.68rem;
+    font-weight: 700;
+    letter-spacing: 0.02em;
+    padding: 0.1rem 0.35rem;
+    border-radius: 6px;
+    background: var(--accent-soft);
+    color: var(--nav-active);
+    white-space: normal;
+    line-height: 1.25;
+  }
+  .thought-src-key {
+    font-size: 0.62rem;
+    color: var(--muted);
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .thought-msg {
+    min-width: 0;
+    word-break: break-word;
+  }
+  .thought-kind--warn .thought-msg { color: #c2410c; }
+  @media (prefers-color-scheme: dark) {
+    .thought-kind--warn .thought-msg { color: #fb923c; }
+  }
+  .thought-line.thought-kind--warn {
+    border-left: 3px solid #ea580c;
+    padding-left: 0.42rem;
+    margin-left: -0.12rem;
+    background: rgba(234, 88, 12, 0.09);
+  }
+  @media (prefers-color-scheme: dark) {
+    .thought-line.thought-kind--warn {
+      background: rgba(251, 146, 60, 0.1);
+    }
+  }
+  .automation-log-filter-row {
+    margin: 0.35rem 0 0.5rem;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.55rem 1rem;
+    font-size: 0.72rem;
+    color: var(--muted);
+  }
+  .automation-log-filter-row label {
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.28rem;
+    white-space: nowrap;
+  }
+  .automation-log-filter-row input[type='search'] {
+    font: inherit;
+    font-size: 0.78rem;
+    padding: 0.28rem 0.45rem;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    background: var(--bg);
+    color: var(--fg);
+    min-width: 10rem;
+    flex: 1;
+    max-width: 22rem;
+  }
+  #automation-log-filter-hint {
+    margin: 0.35rem 0 0;
+    font-size: 0.76rem;
+    color: var(--muted);
+    font-style: italic;
+  }
+  .thought-kind--notice .thought-src-title { background: rgba(59, 130, 246, 0.15); }
+  .thought-kind--debug .thought-msg { opacity: 0.85; font-size: 0.78rem; }
+  .automation-sim-wrap {
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    padding: 1rem 1.05rem 1.1rem;
+    margin-bottom: 1.35rem;
+    background: linear-gradient(135deg, rgba(34, 197, 94, 0.08) 0%, rgba(37, 99, 235, 0.05) 100%);
+    box-shadow: var(--shadow);
+  }
+  .automation-sim-wrap h2 { margin: 0 0 0.4rem; font-size: 1.08rem; font-weight: 800; }
+  .automation-sim-wrap .sim-lead { margin: 0 0 0.75rem; font-size: 0.86rem; color: var(--muted); line-height: 1.45; max-width: 48rem; }
+  .automation-sim-wrap .sim-active-badge {
+    display: inline-block;
+    margin-bottom: 0.65rem;
+    padding: 0.25rem 0.55rem;
+    border-radius: 999px;
+    font-size: 0.74rem;
+    font-weight: 800;
+    background: rgba(34, 197, 94, 0.2);
+    border: 1px solid rgba(34, 197, 94, 0.45);
+    color: var(--fg);
+  }
+  .automation-sim-form { display: flex; flex-wrap: wrap; gap: 0.65rem 1rem; align-items: flex-end; }
+  .automation-sim-form label { display: grid; gap: 0.2rem; font-size: 0.82rem; }
+  .automation-sim-form input[type="date"] { padding: 0.38rem 0.45rem; border-radius: 8px; border: 1px solid var(--border); background: var(--bg); color: var(--fg); }
+  .automation-sim-form .sim-check { display: flex; align-items: center; gap: 0.35rem; margin-bottom: 0.15rem; }
+  .automation-sim-form .sim-check input { width: auto; }
+  .btn-secondary {
+    padding: 0.52rem 1rem;
+    border-radius: 10px;
+    border: 1px solid var(--border);
+    background: var(--bg);
+    color: var(--fg);
+    font-weight: 600;
+    cursor: pointer;
+    font-family: inherit;
+  }
+  .btn-secondary:hover { border-color: var(--nav-active); color: var(--nav-active); }
+  .automation-sim-real-only { font-size: 0.86rem; color: var(--muted); margin: 0; padding: 0.5rem 0; }
+  .automation-replay-bar {
+    margin-top: 1rem;
+    padding: 0.85rem 1rem;
+    border: 1px dashed var(--border);
+    border-radius: 12px;
+    background: rgba(37, 99, 235, 0.06);
+  }
+  .automation-replay-row { margin-bottom: 0.5rem; display: flex; flex-wrap: wrap; gap: 0.5rem 1rem; align-items: center; }
+  .automation-replay-controls { display: flex; flex-wrap: wrap; gap: 0.45rem 0.75rem; align-items: center; margin-bottom: 0.5rem; }
+  .automation-replay-speed select { padding: 0.32rem 0.45rem; border-radius: 8px; font-size: 0.82rem; }
+  .automation-replay-time { margin-top: 0.35rem; font-size: 0.82rem; font-variant-numeric: tabular-nums; }
+  /* Simulação compacta + coluna log */
+  .automation-sim-wrap--compact {
+    padding: 0.45rem 0.55rem 0.55rem !important;
+    margin-bottom: 0 !important;
+    border-radius: 10px !important;
+  }
+  .automation-sim-compact-head {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.35rem;
+    margin-bottom: 0.1rem;
+  }
+  .automation-sim-h2 {
+    font-size: 0.82rem !important;
+    margin: 0 !important;
+    font-weight: 800 !important;
+    border: none !important;
+    padding: 0 !important;
+  }
+  .sim-lead--one {
+    margin: 0 0 0.35rem !important;
+    font-size: 0.7rem !important;
+    line-height: 1.35 !important;
+    max-width: none !important;
+  }
+  .automation-sim-form--compact {
+    gap: 0.25rem 0.45rem !important;
+    align-items: flex-end !important;
+  }
+  .automation-sim-form--compact label {
+    font-size: 0.66rem !important;
+    gap: 0.08rem !important;
+  }
+  .automation-sim-form--compact .sim-check {
+    margin-bottom: 0 !important;
+    font-size: 0.66rem;
+  }
+  .automation-sim-form--compact .submit {
+    padding: 0.35rem 0.55rem !important;
+    font-size: 0.72rem !important;
+  }
+  .sim-active-badge--inline {
+    margin: 0 !important;
+    font-size: 0.62rem !important;
+    padding: 0.1rem 0.4rem !important;
+  }
+  .automation-sim-real-only--compact {
+    padding: 0.3rem 0 !important;
+    font-size: 0.74rem !important;
+  }
+  .automation-thoughts-wrap--tight {
+    padding: 0.6rem 0.65rem 0.65rem !important;
+    margin-bottom: 0 !important;
+  }
+  .thought-lead--short {
+    margin-bottom: 0.4rem !important;
+    font-size: 0.72rem !important;
+  }
+  .automation-log-chart-focus #automation-logs.section-wrap {
+    margin-bottom: 0.45rem;
+  }
+  .automation-log-chart-focus #mercado.section-wrap {
+    margin-bottom: 0;
+  }
+  .automation-log-chart-focus .automation-replay-bar {
+    margin-top: 0.45rem !important;
+    padding: 0.4rem 0.5rem !important;
+  }
+  #sidebar-simulacao .automation-replay-bar {
+    margin-top: 0.45rem !important;
+    padding: 0.4rem 0.5rem !important;
+  }
+  #sidebar-simulacao .automation-replay-row strong {
+    font-size: 0.72rem;
+  }
+  @keyframes automationThoughtFlash {
+    0% { background-color: rgba(59, 130, 246, 0.22); }
+    100% { background-color: transparent; }
+  }
+  @keyframes automationThoughtFlashWarn {
+    0% { background-color: rgba(234, 88, 12, 0.35); }
+    100% { background-color: transparent; }
+  }
+  .thought-line.thought-line--flash {
+    animation: automationThoughtFlash 0.85s ease-out 2;
+  }
+  .thought-line.thought-kind--warn.thought-line--flash {
+    animation: automationThoughtFlashWarn 0.85s ease-out 3;
+  }
+  .automation-toast {
+    display: none;
+    position: fixed;
+    bottom: 1rem;
+    right: 1rem;
+    z-index: 1400;
+    max-width: min(380px, 94vw);
+    padding: 0.65rem 0.75rem 0.7rem;
+    border-radius: 12px;
+    border: 1px solid var(--border);
+    background: var(--nav-bg);
+    box-shadow: 0 14px 40px rgba(2, 6, 23, 0.45);
+    font-size: 0.82rem;
+    line-height: 1.4;
+  }
+  .automation-toast.is-visible {
+    display: block;
+  }
+  .automation-toast .toast-title {
+    font-weight: 700;
+    font-size: 0.72rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--nav-active);
+    margin-bottom: 0.25rem;
+  }
+  .automation-toast .toast-body {
+    color: var(--fg);
+    word-break: break-word;
+  }
+  .automation-notify-row {
+    margin-top: 0.35rem;
+    font-size: 0.72rem;
+    color: var(--muted);
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+    flex-wrap: wrap;
+  }
+  .automation-notify-row label {
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.28rem;
+  }
+  .automation-passive-marquee {
+    margin-top: 0.65rem;
+    border-radius: 10px;
+    border: 1px solid var(--border);
+    background: var(--bg);
+    min-height: 3rem;
+    padding: 0.5rem;
+  }
+  .automation-passive-marquee-inner {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 0.55rem;
+  }
+  .automation-passive-empty {
+    display: block;
+    padding: 0.5rem 0.75rem;
+    font-size: 0.76rem;
+    color: var(--muted);
+    font-style: italic;
+  }
+  .automation-passive-card {
+    width: 100%;
+    border-radius: 10px;
+    border: 1px solid var(--border);
+    background: var(--nav-bg);
+    padding: 0.42rem 0.55rem 0.48rem;
+    box-shadow: 0 2px 8px rgba(2, 6, 23, 0.06);
+  }
+  .automation-passive-card header {
+    margin: 0 0 0.2rem;
+    font-size: 0.72rem;
+    font-weight: 800;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--nav-active);
+  }
+  .automation-passive-card-msg {
+    margin: 0 0 0.25rem;
+    font-size: 0.72rem;
+    line-height: 1.35;
+    color: var(--fg);
+    display: -webkit-box;
+    -webkit-line-clamp: 3;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+  .automation-passive-card time {
+    font-size: 0.65rem;
+    color: var(--muted);
+    font-variant-numeric: tabular-nums;
+  }
+  .automation-passive-card--up { border-left: 3px solid #16a34a; }
+  .automation-passive-card--down { border-left: 3px solid #dc2626; }
+  .automation-passive-card--flat { border-left: 3px solid #64748b; }
+  .automation-log-chart-focus .automation-passive-card-msg { -webkit-line-clamp: 2; font-size: 0.68rem; }
+</style>
+{% endblock %}
+
+{% block dashboard_preface %}
+<section id="automation-logs" class="section-wrap" aria-label="Logs da automação">
+  <div class="automation-thoughts-wrap automation-thoughts-wrap--tight">
+    <h2 class="section-h" style="border:none;padding:0;margin-bottom:0.35rem;display:block;">Logs</h2>
+    <div style="border:1px solid var(--border);border-radius:10px;padding:0.45rem 0.55rem;margin-bottom:0.5rem;background:var(--bg);">
+      <p class="hint" style="margin:0 0 0.3rem;font-size:0.72rem;font-weight:700;letter-spacing:0.03em;text-transform:uppercase;">Perfis</p>
+      <div class="automation-log-filter-row" aria-label="Perfis de execução" style="margin:0;gap:0.4rem 0.6rem;">
+        <form method="post" action="{% url 'trader:automation_profile_select' %}" style="display:flex;gap:0.4rem;align-items:center;flex-wrap:wrap;">
+          {% csrf_token %}
+          <input type="hidden" name="next" value="{{ request.get_full_path }}">
+          <label style="display:flex;gap:0.3rem;align-items:center;">
+            Perfil
+            <select name="profile_id" aria-label="Selecionar perfil">
+              {% for p in automation_profiles %}
+              <option value="{{ p.id }}" {% if p.id == automation_active_profile_id %}selected{% endif %}>{{ p.name }}{% if p.mode == 'simulation' %} (sim){% endif %}</option>
+              {% endfor %}
+            </select>
+          </label>
+          <button type="submit" class="btn-secondary">Trocar</button>
+        </form>
+        {% if trading_environment_is_simulator %}
+        <form method="post" action="{% url 'trader:automation_profile_create' %}" style="display:flex;gap:0.4rem;align-items:center;flex-wrap:wrap;">
+          {% csrf_token %}
+          <input type="hidden" name="next" value="{{ request.get_full_path }}">
+          <input type="text" name="profile_name" placeholder="Novo perfil (simulação)" maxlength="64" required style="max-width:12rem;">
+          <button type="submit" class="btn-secondary">Criar perfil</button>
+        </form>
+        {% endif %}
+      </div>
+      <p class="hint" style="margin:0.25rem 0 0;font-size:0.74rem;">
+        Perfil ativo: <strong>{{ automation_active_profile_name|default:"Tempo_Real" }}</strong>
+      </p>
+      {% if trading_environment_is_simulator and replay_fiction_profile.show %}
+      <div class="hint" style="margin:0.35rem 0 0;font-size:0.72rem;line-height:1.45;border-top:1px solid var(--border);padding-top:0.35rem;" aria-label="Totais replay fictício (ledger local)">
+        <div><strong>Replay fictício · P/L não real. (abertas):</strong>
+          <span class="{{ replay_fiction_profile.active_unreal_total_class }}">{{ replay_fiction_profile.active_unreal_total_str }}</span>
+        </div>
+        <div style="margin-top:0.2rem;"><strong>Replay fictício · P/L líquido realizado (histórico):</strong>
+          <span class="{{ replay_fiction_profile.history_net_total_all_class }}">{{ replay_fiction_profile.history_net_total_all_str }}</span>
+          {% if replay_fiction_profile.history_full_count %}<span class="hint"> ({{ replay_fiction_profile.history_full_count }} enc.)</span>{% endif %}
+        </div>
+        <p style="margin:0.25rem 0 0;font-size:0.68rem;color:var(--muted);">Ao limpar logs neste ambiente, o histórico P/L fictício e posições replay são também apagados.</p>
+      </div>
+      {% endif %}
+    </div>
+
+    <p class="automation-notify-row">
+      <label title="Mostra notificação nativa do sistema quando chegar linha nova (requer permissão)">
+        <input type="checkbox" id="automacoes-browser-notify"> Notificação do browser
+      </label>
+    </p>
+    <div class="automation-log-filter-row" aria-label="Filtros do log">
+      <label title="Oculta linhas de salvar estratégias e ligar/desligar simulação">
+        <input type="checkbox" id="automacoes-log-hide-system"> Ocultar salvamento / simulação
+      </label>
+      <label title="Mostra apenas WARN e NOTICE (inclui «Ordens enviadas»). Oculta info/debug.">
+        <input type="checkbox" id="automacoes-log-only-warn"> Só alertas / avisos
+      </label>
+      <input type="search" id="automacoes-log-q" placeholder="Filtrar por texto ou fonte…" autocomplete="off" aria-label="Filtrar log por texto">
+      <span style="display:inline-flex;gap:0.35rem;margin-left:auto;align-items:center;flex-wrap:wrap;">
+        <a href="{% url 'trader:automations_logs_day' %}" class="btn-secondary" style="text-decoration:none;">Histórico por dia</a>
+        <form method="post" action="{% url 'trader:automation_clear_thoughts' %}" style="margin:0;">
+        {% csrf_token %}
+        <input type="hidden" name="env" value="{% if trading_environment_is_real %}real{% else %}simulator{% endif %}">
+        <input type="hidden" name="next" value="{{ request.get_full_path }}">
+        <button type="submit" class="btn-secondary" onclick="return confirm('Limpar todos os logs deste ambiente?{% if trading_environment_is_simulator %} No simulador, o histórico P/L fictício (replay) e posições associadas também serão apagados.{% endif %}');">Limpar logs</button>
+        </form>
+      </span>
+    </div>
+    <div id="automation-thoughts-scroll" class="automation-thoughts-scroll" tabindex="0">
+      <ul id="automation-thoughts-list">
+        {% for t in thoughts_initial %}
+        <li class="thought-line thought-kind--{{ t.kind }}" data-id="{{ t.id }}" data-kind="{{ t.kind }}" data-source="{{ t.source|default:'' }}" data-title="{{ t.strategy_title|default:'' }}">
+          <span class="thought-time">{{ t.label_time }}</span>
+          <span class="thought-origin">
+            <span class="thought-src-title" title="{{ t.strategy_title|default:t.source|default:'Origem' }}">{{ t.strategy_title|default:t.source|default:"Origem" }}</span>
+            {% if t.source %}<span class="thought-src-key" title="{{ t.source }}">{{ t.source }}</span>{% endif %}
+          </span>
+          <span class="thought-msg">{{ t.message }}</span>
+        </li>
+        {% empty %}
+        <li class="thought-line thought-empty">Sem linhas ainda. Salve estratégias na barra ou aguarde o motor.</li>
+        {% endfor %}
+      </ul>
+      <p id="automation-log-filter-hint" class="thought-empty" hidden>Nenhuma linha corresponde aos filtros.</p>
+    </div>
+    <div class="automation-passive-marquee" aria-label="Último resultado das estratégias passivas">
+      <div id="automation-passive-marquee-inner" class="automation-passive-marquee-inner"></div>
+    </div>
+    <div id="automation-toast" class="automation-toast" role="status" aria-live="polite" aria-atomic="true"></div>
+  </div>
+</section>
+{{ passive_insights_initial|json_script:"automation-passive-initial" }}
+{% endblock %}
+
+{% block dashboard_orders %}{% endblock %}
+
+{% block extra_js %}
+{{ block.super }}
+<script>
+(function() {
+  /* Caminho fixo (sem tag url no template) para deploy parcial seguro */
+  var URL = "/automacoes/pensamentos.json";
+  var lastId = {{ thoughts_last_id|default:0 }};
+  var pollMs = {{ automation_thoughts_poll_ms|default:3200 }};
+  var list = document.getElementById('automation-thoughts-list');
+  var scrollEl = document.getElementById('automation-thoughts-scroll');
+  var toastEl = document.getElementById('automation-toast');
+  var notifyCb = document.getElementById('automacoes-browser-notify');
+  var passiveInner = document.getElementById('automation-passive-marquee-inner');
+  var hintEl = document.getElementById('automation-log-filter-hint');
+  var hideSystemCb = document.getElementById('automacoes-log-hide-system');
+  var onlyWarnCb = document.getElementById('automacoes-log-only-warn');
+  var qInput = document.getElementById('automacoes-log-q');
+  if (!list || !scrollEl) return;
+
+  var LS_LOG_HIDE = 'entrade_log_hide_system';
+  var LS_LOG_WARN = 'entrade_log_only_warn';
+  var LS_LOG_Q = 'entrade_log_q';
+
+  function systemNoiseSource(src) {
+    var s = (src || '').trim().toLowerCase();
+    return s === 'estrategias' || s === 'simulacao_mercado';
+  }
+
+  function applyLogFilter() {
+    var dataLines = list.querySelectorAll('li.thought-line:not(.thought-empty)');
+    var hideSys = !!(hideSystemCb && hideSystemCb.checked);
+    var onlyWarn = !!(onlyWarnCb && onlyWarnCb.checked);
+    var q = (qInput && qInput.value ? qInput.value : '').trim().toLowerCase();
+    var n = 0;
+    dataLines.forEach(function(li) {
+      var kind = (li.getAttribute('data-kind') || 'info').toLowerCase();
+      var src = (li.getAttribute('data-source') || '').trim().toLowerCase();
+      var title = (li.getAttribute('data-title') || '').trim().toLowerCase();
+      var msgEl = li.querySelector('.thought-msg');
+      var msg = msgEl ? (msgEl.textContent || '').toLowerCase() : '';
+      var vis = true;
+      if (hideSys && systemNoiseSource(src)) vis = false;
+      /* NOTICE = avisos (ex. ordens enviadas); não esconder atrás de «só alertas». */
+      if (onlyWarn && kind !== 'warn' && kind !== 'notice') vis = false;
+      if (q && vis && src.indexOf(q) < 0 && title.indexOf(q) < 0 && msg.indexOf(q) < 0) vis = false;
+      li.style.display = vis ? '' : 'none';
+      if (vis) n += 1;
+    });
+    if (hintEl) {
+      var total = dataLines.length;
+      hintEl.hidden = total === 0 || n > 0;
+    }
+  }
+
+  var logFilterTimer = null;
+  function scheduleApplyLogFilter() {
+    if (logFilterTimer) clearTimeout(logFilterTimer);
+    logFilterTimer = setTimeout(function() {
+      logFilterTimer = null;
+      applyLogFilter();
+    }, 140);
+  }
+
+  var MAX_THOUGHT_DOM = 400;
+  function pruneThoughtDom() {
+    var nodes = list.querySelectorAll('li.thought-line[data-id]');
+    if (nodes.length <= MAX_THOUGHT_DOM) return;
+    var cut = nodes.length - MAX_THOUGHT_DOM;
+    for (var i = 0; i < cut; i++) {
+      var n = nodes[i];
+      if (n && n.parentNode) n.remove();
+    }
+  }
+
+  try {
+    if (hideSystemCb && localStorage.getItem(LS_LOG_HIDE) === '1') hideSystemCb.checked = true;
+    if (onlyWarnCb && localStorage.getItem(LS_LOG_WARN) === '1') onlyWarnCb.checked = true;
+    if (qInput && localStorage.getItem(LS_LOG_Q)) qInput.value = localStorage.getItem(LS_LOG_Q);
+  } catch (eLS0) {}
+
+  if (hideSystemCb) {
+    hideSystemCb.addEventListener('change', function() {
+      try { localStorage.setItem(LS_LOG_HIDE, hideSystemCb.checked ? '1' : '0'); } catch (eLS1) {}
+      applyLogFilter();
+    });
+  }
+  if (onlyWarnCb) {
+    onlyWarnCb.addEventListener('change', function() {
+      try { localStorage.setItem(LS_LOG_WARN, onlyWarnCb.checked ? '1' : '0'); } catch (eLS2) {}
+      applyLogFilter();
+    });
+  }
+  if (qInput) {
+    var qTimer = null;
+    qInput.addEventListener('input', function() {
+      try { localStorage.setItem(LS_LOG_Q, qInput.value || ''); } catch (eLS3) {}
+      if (qTimer) clearTimeout(qTimer);
+      qTimer = setTimeout(function() {
+        qTimer = null;
+        applyLogFilter();
+      }, 180);
+    });
+  }
+  applyLogFilter();
+
+  var passiveState = {};
+  (function loadPassiveInitial() {
+    try {
+      var el = document.getElementById('automation-passive-initial');
+      if (!el || !el.textContent) return;
+      var arr = JSON.parse(el.textContent);
+      if (!Array.isArray(arr)) return;
+      arr.forEach(function (c) {
+        if (c && c.source) passiveState[c.source] = c;
+      });
+    } catch (e0) {}
+  })();
+
+  function accentFromThought(t) {
+    if (!t || t.source !== 'tendencia_mercado') return '';
+    var m = t.message || '';
+    if (m.indexOf('Tendência Alta') >= 0) return 'up';
+    if (m.indexOf('Tendência Baixa') >= 0) return 'down';
+    return 'flat';
+  }
+
+  function passiveCardsSorted() {
+    return Object.keys(passiveState)
+      .sort()
+      .map(function (k) {
+        return passiveState[k];
+      });
+  }
+
+  function renderPassiveMarquee() {
+    if (!passiveInner) return;
+    var arr = passiveCardsSorted();
+    if (!arr.length) {
+      passiveInner.innerHTML =
+        '<span class="automation-passive-empty">Sem dados de estratégias passivas ainda — ative uma estratégia passiva na barra e aguarde o motor.</span>';
+      passiveInner.classList.remove('is-animated');
+      return;
+    }
+    function cardHtml(c) {
+      var ac = c.accent ? ' automation-passive-card--' + esc(c.accent) : '';
+      return (
+        '<article class="automation-passive-card' +
+        ac +
+        '" data-source="' +
+        esc(c.source) +
+        '">' +
+        '<header>' +
+        esc(c.title || c.source) +
+        '</header>' +
+        '<p class="automation-passive-card-msg">' +
+        esc(c.message || '') +
+        '</p>' +
+        '<time>' +
+        esc(c.label_time || '') +
+        '</time></article>'
+      );
+    }
+    passiveInner.innerHTML = arr.map(cardHtml).join('');
+    passiveInner.classList.remove('is-animated');
+  }
+
+  function upsertPassiveFromThought(t) {
+    if (!t || !t.is_passive) return;
+    var src = (t.source || '').trim();
+    if (!src) return;
+    passiveState[src] = {
+      source: src,
+      title: (t.strategy_title || src).trim(),
+      message: (t.message || '').trim(),
+      label_time: (t.label_time || '').trim(),
+      accent: accentFromThought(t),
+    };
+    renderPassiveMarquee();
+  }
+
+  renderPassiveMarquee();
+
+  var LS_NOTIFY = 'entrade_automacoes_browser_notify';
+  var toastTimer = null;
+  try {
+    if (notifyCb && localStorage.getItem(LS_NOTIFY) === '1') notifyCb.checked = true;
+  } catch (e0) {}
+  if (notifyCb) {
+    notifyCb.addEventListener('change', function() {
+      var on = !!notifyCb.checked;
+      try { localStorage.setItem(LS_NOTIFY, on ? '1' : '0'); } catch (e1) {}
+      if (on && typeof Notification !== 'undefined' && Notification.permission === 'default') {
+        Notification.requestPermission().catch(function() {});
+      }
+    });
+  }
+
+  function showAutomationToast(src, msg) {
+    if (!toastEl) return;
+    var title = (src || '').trim() || 'Automação';
+    var body = (msg || '').trim();
+    if (body.length > 320) body = body.slice(0, 317) + '…';
+    var low = body.toLowerCase();
+    var toastMs =
+      low.indexOf('ordens enviadas') >= 0 || low.indexOf('ordem enviada') >= 0 ? 26000 : 14000;
+    toastEl.innerHTML =
+      '<div class="toast-title">' + esc(title) + '</div>' +
+      '<div class="toast-body">' + esc(body) + '</div>';
+    toastEl.classList.add('is-visible');
+    if (toastTimer) clearTimeout(toastTimer);
+    toastTimer = setTimeout(function() {
+      toastEl.classList.remove('is-visible');
+      toastTimer = null;
+    }, toastMs);
+  }
+
+  function maybeBrowserNotify(src, msg) {
+    try {
+      if (!notifyCb || !notifyCb.checked) return;
+      if (typeof Notification === 'undefined' || Notification.permission !== 'granted') return;
+      var body = (msg || '').trim();
+      if (body.length > 180) body = body.slice(0, 177) + '…';
+      new Notification((src || 'Automação').trim() || 'Automação', { body: body });
+    } catch (e2) {}
+  }
+
+  function esc(s) {
+    if (s == null) return '';
+    return String(s)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
+  }
+
+  function scrollThoughtsToEnd() {
+    scrollEl.scrollTop = scrollEl.scrollHeight;
+  }
+
+  /**
+   * Evita buscar linhas novas / toasts quando o separador está em segundo plano,
+   * o replay de simulação está em pausa ou o poll do gráfico ao vivo parou (fim de pregão, etc.).
+   */
+  function automationThoughtsPollAllowed() {
+    try {
+      if (document.visibilityState === 'hidden') return false;
+      if (window.__ENTRADE_LIVE_CHART_POLL_PAUSED__) return false;
+      if (window.__ENTRADE_REPLAY_LOG_POLL_SUPPRESS__ === true) return false;
+    } catch (ePoll) {}
+    return true;
+  }
+
+  function appendThought(t) {
+    var empty = list.querySelector('.thought-empty');
+    if (empty) empty.remove();
+    var li = document.createElement('li');
+    li.className = 'thought-line thought-kind--' + esc(t.kind || 'info');
+    li.setAttribute('data-id', String(t.id));
+    li.setAttribute('data-kind', esc(t.kind || 'info'));
+    li.setAttribute('data-source', esc((t.source || '').trim()));
+    li.setAttribute('data-title', esc((t.strategy_title || '').trim()));
+    var src = (t.source || '').trim();
+    var title = (t.strategy_title || src || 'Origem').trim();
+    var srcHtml =
+      '<span class="thought-origin">' +
+      '<span class="thought-src-title" title="' + esc(title) + '">' + esc(title) + '</span>' +
+      (src ? '<span class="thought-src-key" title="' + esc(src) + '">' + esc(src) + '</span>' : '') +
+      '</span>';
+    li.innerHTML =
+      '<span class="thought-time">' + esc(t.label_time || '') + '</span>' +
+      srcHtml +
+      '<span class="thought-msg">' + esc(t.message || '') + '</span>';
+    list.appendChild(li);
+    li.classList.add('thought-line--flash');
+    setTimeout(function() { li.classList.remove('thought-line--flash'); }, 4200);
+    pruneThoughtDom();
+    scheduleApplyLogFilter();
+    scrollThoughtsToEnd();
+    upsertPassiveFromThought(t);
+    showAutomationToast(title, t.message || '');
+    maybeBrowserNotify(title, t.message || '');
+  }
+
+  /* Na carga da página a lista vem antiga→nova; sem isto o viewport fica no topo (linhas velhas). */
+  function scheduleScrollThoughtsToEnd() {
+    requestAnimationFrame(function() {
+      scrollThoughtsToEnd();
+      requestAnimationFrame(scrollThoughtsToEnd);
+    });
+  }
+  scheduleScrollThoughtsToEnd();
+
+  var thoughtPollTimer = null;
+  var thoughtFetchInflight = false;
+
+  function scheduleNextThoughtPoll() {
+    if (thoughtPollTimer) clearTimeout(thoughtPollTimer);
+    var delay = Math.min(12000, Math.max(1400, pollMs));
+    thoughtPollTimer = setTimeout(runThoughtPollTick, delay);
+  }
+
+  function runThoughtPollTick() {
+    thoughtPollTimer = null;
+    if (!automationThoughtsPollAllowed()) {
+      scheduleNextThoughtPoll();
+      return;
+    }
+    if (thoughtFetchInflight) {
+      scheduleNextThoughtPoll();
+      return;
+    }
+    thoughtFetchInflight = true;
+    fetch(URL + '?since=' + encodeURIComponent(String(lastId)), {
+      credentials: 'same-origin',
+      headers: { 'Accept': 'application/json' }
+    })
+      .then(function(r) { if (!r.ok) throw new Error('HTTP'); return r.json(); })
+      .then(function(data) {
+        var rows = data && data.thoughts ? data.thoughts : [];
+        rows.forEach(function(t) {
+          if (t && t.id != null && t.id > lastId) {
+            if (list.querySelector('li[data-id="' + String(t.id) + '"]')) {
+              lastId = t.id;
+              return;
+            }
+            appendThought(t);
+            lastId = t.id;
+          }
+        });
+        if (data && typeof data.poll_ms === 'number' && data.poll_ms >= 1200) {
+          pollMs = Math.min(12000, Math.max(1200, data.poll_ms));
+        }
+      })
+      .catch(function() {})
+      .finally(function() {
+        thoughtFetchInflight = false;
+        scheduleNextThoughtPoll();
+      });
+  }
+
+  scheduleNextThoughtPoll();
+})();
+</script>
+{% if trading_environment_is_simulator and automation_market_sim.effective %}
+{% include "trader/partials/automation_replay_script.html" %}
+{% endif %}
+{% endblock %}
