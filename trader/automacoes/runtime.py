@@ -12,6 +12,14 @@ def _normalize_max_open_operations(v: int | None) -> int:
     return max(1, min(n, 10))
 
 
+def _normalize_max_daily_orders(v: int | None) -> int:
+    try:
+        n = int(v or 10)
+    except (TypeError, ValueError):
+        n = 10
+    return max(1, min(n, 10))
+
+
 def runtime_enabled(user, trading_environment: str | None) -> bool:
     if user is None or not trading_environment:
         return True
@@ -50,6 +58,19 @@ def runtime_max_open_operations(user, trading_environment: str | None) -> int:
     return _normalize_max_open_operations(getattr(row, 'max_open_operations', 1))
 
 
+def runtime_max_daily_orders(user, trading_environment: str | None) -> int:
+    if user is None or not trading_environment:
+        return 10
+    env = normalize_environment(trading_environment)
+    row = AutomationRuntimePreference.objects.filter(
+        user=user,
+        trading_environment=env,
+    ).first()
+    if row is None:
+        return 10
+    return _normalize_max_daily_orders(getattr(row, 'max_daily_orders', 10))
+
+
 # Contratos/acções por «operação» de entrada (1 = uma unidade por operação; alinhado ao campo Máx. operações abertas).
 _UNITS_PER_STRATEGY_OPERATION = 1
 
@@ -72,6 +93,7 @@ def set_runtime_enabled(
     *,
     enabled: bool,
     max_open_operations: int | None = None,
+    max_daily_orders: int | None = None,
 ) -> AutomationRuntimePreference | None:
     if user is None:
         return None
@@ -79,6 +101,8 @@ def set_runtime_enabled(
     defaults = {'enabled': bool(enabled)}
     if max_open_operations is not None:
         defaults['max_open_operations'] = _normalize_max_open_operations(max_open_operations)
+    if max_daily_orders is not None:
+        defaults['max_daily_orders'] = _normalize_max_daily_orders(max_daily_orders)
     row, _ = AutomationRuntimePreference.objects.update_or_create(
         user=user,
         trading_environment=env,

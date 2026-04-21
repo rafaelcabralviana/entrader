@@ -1285,6 +1285,19 @@ def _replay_shadow_sim_replay_until(request: Any | None) -> datetime | None:
     """Instante do scrubber (prefs Celery) para alinhar cotação ao frame do replay fictício."""
     if request is None:
         return None
+    try:
+        raw_q = str((getattr(request, 'GET', {}) or {}).get('replay_until') or '').strip()
+    except Exception:
+        raw_q = ''
+    if raw_q:
+        try:
+            from trader.automacoes.leafar_candles import parse_replay_until_iso
+
+            dt_q = parse_replay_until_iso(raw_q)
+            if dt_q is not None:
+                return dt_q
+        except Exception:
+            pass
     user = getattr(request, 'user', None)
     if user is None or not getattr(user, 'is_authenticated', False):
         return None
@@ -1320,6 +1333,44 @@ def _replay_shadow_mark_decimal(ticker: str, until: datetime | None) -> Decimal 
         return Decimal(str(m))
     except InvalidOperation:
         return None
+
+
+def _replay_shadow_mark_with_ts(
+    ticker: str,
+    until: datetime | None,
+) -> tuple[Decimal | None, datetime | None]:
+    """Preço de marca e timestamp do snapshot usado no replay_shadow."""
+    from trader.custody_enrichment import mark_price_from_quote
+    from trader.models import QuoteSnapshot
+
+    sym = (ticker or '').strip().upper()
+    if not sym:
+        return None, None
+    qs = QuoteSnapshot.objects.filter(ticker__iexact=sym)
+    if until is not None:
+        qs = qs.filter(captured_at__lte=until)
+    row = qs.order_by('-captured_at').values('quote_data', 'captured_at').first()
+    if not isinstance(row, dict):
+        return None, None
+    qd = row.get('quote_data')
+    if not isinstance(qd, dict):
+        return None, row.get('captured_at')
+    m = mark_price_from_quote(qd)
+    if m is None:
+        return None, row.get('captured_at')
+    try:
+        return Decimal(str(m)), row.get('captured_at')
+    except InvalidOperation:
+        return None, row.get('captured_at')
+
+
+def _fmt_dt_brt(dt: datetime | None) -> str:
+    if dt is None:
+        return '—'
+    try:
+        return dt.astimezone(_DISPLAY_TZ_BRT).strftime('%d/%m/%Y %H:%M:%S')
+    except Exception:
+        return '—'
 
 
 def _fmt_decimal_br(d: Decimal, quant: Decimal) -> str:
@@ -1453,6 +1504,10 @@ def _replay_shadow_custody_panel(request: Any | None = None) -> dict[str, Any]:
         'history_net_total_all_str': '—',
         'history_net_total_all_class': '',
         'history_full_count': 0,
+        'replay_cursor_iso': '',
+        'replay_cursor_brt': '—',
+        'mark_asof_iso': '',
+        'mark_asof_brt': '—',
     }
     sess_replay = False
     if request is not None:
@@ -1465,6 +1520,7 @@ def _replay_shadow_custody_panel(request: Any | None = None) -> dict[str, Any]:
     from trader.models import ClosedOperation, Position
 
     until = _replay_shadow_sim_replay_until(request)
+    mark_asof_latest: datetime | None = None
     price_q = Decimal('0.000001')
 
     active_base_qs = Position.objects.filter(
@@ -1475,9 +1531,11 @@ def _replay_shadow_custody_panel(request: Any | None = None) -> dict[str, Any]:
     active_unreal_sum = Decimal(0)
     active_unreal_n = 0
     for p in active_base_qs.iterator(chunk_size=64):
-        mark = _replay_shadow_mark_decimal(p.ticker, until)
+        mark, mark_ts = _replay_shadow_mark_with_ts(p.ticker, until)
         if mark is None:
             continue
+        if mark_ts is not None and (mark_asof_latest is None or mark_ts > mark_asof_latest):
+            mark_asof_latest = mark_ts
         avg = p.avg_open_price
         qty = p.quantity_open
         if p.side == Position.Side.LONG:
@@ -1490,7 +1548,9 @@ def _replay_shadow_custody_panel(request: Any | None = None) -> dict[str, Any]:
     active_qs = active_base_qs.order_by('-opened_at')[:32]
     active_rows: list[dict[str, Any]] = []
     for p in active_qs:
-        mark = _replay_shadow_mark_decimal(p.ticker, until)
+        mark, mark_ts = _replay_shadow_mark_with_ts(p.ticker, until)
+        if mark_ts is not None and (mark_asof_latest is None or mark_ts > mark_asof_latest):
+            mark_asof_latest = mark_ts
         avg = p.avg_open_price
         qty = p.quantity_open
         unreal: Decimal | None = None
@@ -1564,6 +1624,10 @@ def _replay_shadow_custody_panel(request: Any | None = None) -> dict[str, Any]:
         'history_net_total_all_str': _fmt_money_brl_simple(history_net_total_all),
         'history_net_total_all_class': _replay_pnl_css_class(history_net_total_all),
         'history_full_count': history_full_count,
+        'replay_cursor_iso': until.isoformat() if until is not None else '',
+        'replay_cursor_brt': _fmt_dt_brt(until),
+        'mark_asof_iso': mark_asof_latest.isoformat() if mark_asof_latest is not None else '',
+        'mark_asof_brt': _fmt_dt_brt(mark_asof_latest),
     }
 
 

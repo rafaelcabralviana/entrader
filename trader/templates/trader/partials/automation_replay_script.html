@@ -12,8 +12,9 @@
 
   try {
     window.__ENTRADE_REPLAY_PLAYING__ = false;
+    window.__ENTRADE_REPLAY_PAUSED__ = true;
     window.__ENTRADE_REPLAY_LOG_POLL_SUPPRESS__ = false;
-    window.__ENTRADE_REPLAY_CURSOR_STRATEGIES__ = true;
+    window.__ENTRADE_REPLAY_CURSOR_STRATEGIES__ = false;
   } catch (eRP0) {}
 
   var speedEl = document.getElementById('automation-replay-speed');
@@ -138,7 +139,27 @@
         'X-CSRFToken': tok,
       },
       body: body,
-    }).catch(function() {});
+    })
+      .then(function(r) {
+        if (!r || !r.ok) return null;
+        return r.json().catch(function() { return null; });
+      })
+      .then(function(payload) {
+        var replayUntilEff = '';
+        try {
+          replayUntilEff = String((payload && payload.replay_until) || (iso || '')).trim();
+        } catch (eIso) {
+          replayUntilEff = String(iso || '').trim();
+        }
+        try {
+          window.dispatchEvent(
+            new CustomEvent('entrade:replay-cursor-applied', {
+              detail: { strategies: !!strat, replay_until: replayUntilEff }
+            })
+          );
+        } catch (eEvR) {}
+      })
+      .catch(function() {});
   }
 
   function formatYmdBrFromIso(ymd) {
@@ -163,6 +184,12 @@
     try {
       window.__ENTRADE_REPLAY_CURSOR_STRATEGIES__ = true;
     } catch (eCrs) {}
+  }
+
+  function replayCursorStrategiesOff() {
+    try {
+      window.__ENTRADE_REPLAY_CURSOR_STRATEGIES__ = false;
+    } catch (eCrs0) {}
   }
 
   function syncCandlesTo(iso, withStrategies) {
@@ -268,6 +295,7 @@
     playing = false;
     try {
       window.__ENTRADE_REPLAY_PLAYING__ = false;
+      window.__ENTRADE_REPLAY_PAUSED__ = true;
       window.__ENTRADE_REPLAY_LOG_POLL_SUPPRESS__ = !reachedEnd;
     } catch (eRP2) {}
     clearVirtualTimer();
@@ -279,7 +307,8 @@
       if (st) st.textContent = 'Pausado.';
       if (curVirtual && isFinite(curVirtual.getTime())) {
         persistCursorToBar();
-        postReplayCursorImmediate(curVirtual.toISOString(), true);
+        replayCursorStrategiesOff();
+        postReplayCursorImmediate(curVirtual.toISOString(), false);
       }
     }
   }
@@ -327,6 +356,7 @@
     playing = true;
     try {
       window.__ENTRADE_REPLAY_PLAYING__ = true;
+      window.__ENTRADE_REPLAY_PAUSED__ = false;
       window.__ENTRADE_REPLAY_LOG_POLL_SUPPRESS__ = false;
     } catch (eRP1) {}
     setPlayButtonsEnabled(false);
@@ -348,7 +378,7 @@
     persistCursorToBar();
     updateTimeLabel();
     if (boundsOk()) {
-      syncCandlesTo(curVirtual.toISOString(), true);
+      syncCandlesTo(curVirtual.toISOString(), false);
     }
     try {
       window.__ENTRADE_REPLAY_LOG_POLL_SUPPRESS__ = false;
@@ -394,10 +424,11 @@
     }
     setPlayButtonsEnabled(true);
     updateTimeLabel();
+    replayCursorStrategiesOff();
     syncSessionDateSelect(function() {
       if (curVirtual && isFinite(curVirtual.getTime())) {
         persistCursorToBar();
-        syncCandlesTo(curVirtual.toISOString(), true);
+        syncCandlesTo(curVirtual.toISOString(), false);
       }
       var stOk = replayStatusNow();
       if (stOk) {

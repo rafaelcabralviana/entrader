@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from datetime import datetime
 from typing import Any, Optional
 
@@ -34,6 +35,11 @@ from trader.automacoes.execution_guard import (
     try_consume_order_slot_for_round,
 )
 from trader.automacoes.runtime import runtime_max_open_operations, runtime_max_position_units
+from trader.automacoes.runtime import runtime_max_daily_orders
+from trader.automacoes.order_limits import (
+    release_daily_order_budget,
+    try_consume_daily_order_budget,
+)
 from trader.automacoes.session_range_bracket import (
     adjust_tp_sl_to_session_extremes,
     session_high_low_from_candles,
@@ -57,6 +63,30 @@ from trader.models import AutomationThought, AutomationTriggerMarker
 from trader.trading_system.contracts.context import ObservationContext
 
 logger = logging.getLogger(__name__)
+
+
+# region agent log
+def _agent_debug_log(
+    hypothesis_id: str,
+    location: str,
+    message: str,
+    data: dict[str, Any],
+) -> None:
+    try:
+        payload = {
+            'sessionId': 'c8b049',
+            'runId': 'replay-monitor-desync-v2',
+            'hypothesisId': hypothesis_id,
+            'location': location,
+            'message': message,
+            'data': data,
+            'timestamp': int(time.time() * 1000),
+        }
+        with open('/home/APICLEAR/.cursor/debug-c8b049.log', 'a', encoding='utf-8') as fh:
+            fh.write(json.dumps(payload, ensure_ascii=True) + '\n')
+    except Exception:
+        pass
+# endregion
 
 # Anti-spam entre disparos (só afecta a **ativa**); valor baixo = mais tentativas de ordem.
 _COOLDOWN_SEC = 25
@@ -431,9 +461,27 @@ def run_tendencia_ativa_for_context(ctx: ObservationContext, user, env: str) -> 
         can_exec = bool(send_allowed and runtime_started)
 
     if trailing_stop_adjustment_enabled(user, env, execution_profile=profile):
+        t0_trail = time.perf_counter()
         trail_msg = try_trend_ativa_trailing_stop_update(
-            sym, last, bracket_lane=bracket_lane
+            sym,
+            last,
+            bracket_lane=bracket_lane,
+            trading_environment=env,
         )
+        # region agent log
+        _agent_debug_log(
+            'H4',
+            'tendencia_mercado_ativa.py:run',
+            'trailing tick elapsed',
+            {
+                'ticker': sym,
+                'env': str(env),
+                'replay_sim': bool(replay_sim),
+                'elapsed_ms': round((time.perf_counter() - t0_trail) * 1000.0, 3),
+                'trail_msg': bool(trail_msg),
+            },
+        )
+        # endregion
         if trail_msg:
             try:
                 from trader.automacoes.thoughts import record_automation_thought
@@ -633,7 +681,11 @@ def run_tendencia_ativa_for_context(ctx: ObservationContext, user, env: str) -> 
         return
 
     lane = 'replay_shadow' if replay_sim else 'standard'
-    if has_open_position_for_ticker(sym, position_lane=lane):
+    if has_open_position_for_ticker(
+        sym,
+        trading_environment=env,
+        position_lane=lane,
+    ):
         try:
             from trader.automacoes.thoughts import record_automation_thought
 
@@ -655,7 +707,11 @@ def run_tendencia_ativa_for_context(ctx: ObservationContext, user, env: str) -> 
     max_open_ops = runtime_max_open_operations(user, env)
     opened_now = count_open_positions(position_lane=lane)
     max_u = runtime_max_position_units(user, env)
-    total_u = total_open_quantity_for_ticker(sym, position_lane=lane)
+    total_u = total_open_quantity_for_ticker(
+        sym,
+        trading_environment=env,
+        position_lane=lane,
+    )
     if total_u >= max_u:
         try:
             from trader.automacoes.thoughts import record_automation_thought
@@ -724,6 +780,36 @@ def run_tendencia_ativa_for_context(ctx: ObservationContext, user, env: str) -> 
     if not cache.add(lock_k, '1', timeout=_COOLDOWN_SEC):
         return
 
+    weight = max(0.0, min(1.0, abs(float(score))))
+    max_daily = runtime_max_daily_orders(user, env)
+    daily = try_consume_daily_order_budget(
+        user_id=int(getattr(user, 'id', 0) or 0),
+        trading_environment=env,
+        ticker=sym,
+        strategy_weight=weight,
+        user_daily_limit=max_daily,
+    )
+    if not daily.ok:
+        try:
+            from trader.automacoes.thoughts import record_automation_thought
+
+            record_automation_thought(
+                user,
+                env,
+                (
+                    f'Tendência ativa [{data_label} · {sym}] bloqueada por orçamento diário: '
+                    f'{daily.reason}. Uso {daily.used}/{daily.limit}, peso={weight:.2f}, '
+                    f'limiar={daily.required_weight:.2f}.'
+                )[:3900],
+                source='tendencia_mercado_ativa',
+                kind=AutomationThought.Kind.NOTICE,
+                execution_profile=profile,
+            )
+        except Exception:
+            logger.exception('tendencia_ativa thought daily budget block')
+        return
+    budget_consumed = True
+
     ok_exec = False
     if replay_sim:
         ok_exec = bool(
@@ -759,6 +845,15 @@ def run_tendencia_ativa_for_context(ctx: ObservationContext, user, env: str) -> 
         _record_last_bracket_execution(
             env, user, profile, sym, side, replay_sim=replay_sim
         )
+    elif budget_consumed:
+        try:
+            release_daily_order_budget(
+                user_id=int(getattr(user, 'id', 0) or 0),
+                trading_environment=env,
+                ticker=sym,
+            )
+        except Exception:
+            logger.exception('tendencia_ativa release daily budget after failed execution')
 
 
 register_evaluator('tendencia_mercado_ativa', evaluate)

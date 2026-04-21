@@ -7,15 +7,18 @@ import time
 from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any
+from django.utils import timezone as dj_tz
 
 from trader.automacoes.market_entry_trailing import (
     stage_market_entry_for_trailing,
     stage_replay_entry_for_trailing,
 )
+from trader.automacoes.order_limits import clamp_quantity_to_ticket_limit
 from trader.automacoes.thoughts import record_automation_thought
 from trader.custody_simulator import record_bracket_execution_marker
 from trader.environment import ENV_REPLAY, ENV_SIMULATOR, get_current_environment, normalize_environment
 from trader.automacoes.execution_guard import release_market_entry_lock, try_acquire_market_entry_lock
+from trader.automacoes.universal_bracket_trailing import BRACKET_LANE_REPLAY_SHADOW, state_cache_key
 from trader.models import AutomationThought, Position
 from trader.order_enums import (ORDER_SIDE_BUY, ORDER_SIDE_SELL)
 from trader.services.operations_history import (
@@ -76,6 +79,7 @@ def execute_leafar_bracket(
     *,
     quantity: int = 1,
     user: Any | None = None,
+    execution_profile: Any | None = None,
 ) -> LeafarExecutionResult:
     """
     Entrada a mercado; proteção inicial (TP/SL) fica a cargo do trailing central.
@@ -84,7 +88,7 @@ def execute_leafar_bracket(
     """
     sym = (ticker or '').strip().upper()
     out = LeafarExecutionResult(ok=False, messages=[])
-    qty = max(1, int(quantity))
+    qty = clamp_quantity_to_ticket_limit(sym, max(1, int(quantity)))
     entry_side = _normalize_order_side(signal.side)
     env_cur = get_current_environment()
     uid = int(getattr(user, 'id', 0) or 0)
@@ -113,6 +117,7 @@ def execute_leafar_bracket(
             position_lane=Position.Lane.STANDARD,
             market_sender=lambda body: _send_market_with_retry(body, tries=2),
             user=user,
+            execution_profile=execution_profile,
             trading_environment=env_cur,
         )
         out.market_resp = staged.market_resp if isinstance(staged.market_resp, dict) else {}
@@ -143,10 +148,13 @@ def execute_leafar_bracket(
 
         if should_record_local_history('market', out.market_resp or {}):
             try:
+                exec_px = staged.executed_price
                 hist = infer_execution_price(
                     {'Ticker': sym, 'Side': entry_side, 'Quantity': qty},
                     out.market_resp or {},
                 )
+                if exec_px is not None:
+                    hist = Decimal(str(exec_px))
                 register_trade_execution(
                     ticker=sym,
                     side=entry_side,
@@ -156,6 +164,22 @@ def execute_leafar_bracket(
                     trading_environment=get_current_environment(),
                     position_lane=Position.Lane.STANDARD,
                 )
+                try:
+                    from trader.models import AutomationTriggerMarker
+
+                    if user is not None:
+                        AutomationTriggerMarker.objects.create(
+                            user=user,
+                            execution_profile=execution_profile,
+                            trading_environment=env_cur,
+                            ticker=sym,
+                            strategy_key='trade_entry',
+                            marker_at=dj_tz.now(),
+                            price=hist,
+                            message=f'source=leafar;side={entry_side};qty={qty};market_id={mkt_id}'[:500],
+                        )
+                except Exception:
+                    logger.exception('leafar entry marker create')
             except Exception:
                 logger.exception('leafar register_trade_execution')
 
@@ -184,7 +208,7 @@ def execute_leafar_bracket_replay_shadow(
     Bracket fictício no replay: preço de entrada = ``signal.last`` (fecho da vela reproduzida).
     """
     sym = (ticker or '').strip().upper()
-    qty = max(1, int(quantity))
+    qty = clamp_quantity_to_ticket_limit(sym, max(1, int(quantity)))
     entry_side = _normalize_order_side(signal.side)
     env_norm = normalize_environment(env)
     uid = int(getattr(log_user, 'id', 0) or 0)
@@ -212,6 +236,7 @@ def execute_leafar_bracket_replay_shadow(
             strategy_source='leafar',
             position_lane=Position.Lane.REPLAY_SHADOW,
             user=log_user,
+            execution_profile=execution_profile,
             trading_environment=env_norm,
         )
         if not staged.ok:
@@ -246,6 +271,56 @@ def execute_leafar_bracket_replay_shadow(
             except Exception:
                 logger.exception('leafar replay shadow thought')
 
+        try:
+            register_trade_execution(
+                ticker=sym,
+                side=entry_side,
+                quantity=qty,
+                price=Decimal(str(staged.executed_price or _round_px(signal.last))),
+                source='leafar_replay',
+                trading_environment=env_norm,
+                position_lane=Position.Lane.REPLAY_SHADOW,
+            )
+            try:
+                from trader.models import AutomationTriggerMarker
+
+                if log_user is not None:
+                    AutomationTriggerMarker.objects.create(
+                        user=log_user,
+                        execution_profile=execution_profile,
+                        trading_environment=env_norm,
+                        ticker=sym,
+                        strategy_key='trade_entry',
+                        marker_at=dj_tz.now(),
+                        price=Decimal(str(staged.executed_price or _round_px(signal.last))),
+                        message=f'source=leafar_replay;side={entry_side};qty={qty};market_id={mkt_id}'[:500],
+                    )
+            except Exception:
+                logger.exception('leafar replay entry marker create')
+            try:
+                from trader.panel_context import invalidate_collateral_custody_cache
+
+                invalidate_collateral_custody_cache()
+            except Exception:
+                logger.exception('leafar invalidate custody cache replay')
+        except Exception:
+            logger.exception('leafar register_trade_execution replay')
+            try:
+                from django.core.cache import cache
+
+                cache.delete(
+                    state_cache_key(
+                        sym,
+                        bracket_lane=BRACKET_LANE_REPLAY_SHADOW,
+                        trading_environment=env_norm,
+                    )
+                )
+            except Exception:
+                logger.exception('leafar rollback trailing state replay')
+            return LeafarExecutionResult(
+                ok=False,
+                messages=['Falha ao registrar execução replay; estado do trailing foi resetado.'],
+            )
         if get_current_environment() in (ENV_SIMULATOR, ENV_REPLAY):
             try:
                 record_bracket_execution_marker(
@@ -259,19 +334,6 @@ def execute_leafar_bracket_replay_shadow(
                 )
             except Exception:
                 logger.exception('leafar custody marker replay')
-
-        try:
-            register_trade_execution(
-                ticker=sym,
-                side=entry_side,
-                quantity=qty,
-                price=Decimal(str(_round_px(signal.last))),
-                source='leafar_replay',
-                trading_environment=get_current_environment(),
-                position_lane=Position.Lane.REPLAY_SHADOW,
-            )
-        except Exception:
-            logger.exception('leafar register_trade_execution replay')
 
         return out
     finally:

@@ -52,6 +52,7 @@ from trader.trading_system.data.readers import (
 )
 
 logger = logging.getLogger(__name__)
+_REPLAY_INTERACTIVE_KEY = 'automation:replay:interactive:user:{uid}'
 
 User = get_user_model()
 _TZ_BRT = ZoneInfo('America/Sao_Paulo')
@@ -288,6 +289,35 @@ def _interval_sec_from_settings() -> int:
         return 10
 
 
+def _replay_interactive_cache_key(user_id: int) -> str:
+    return _REPLAY_INTERACTIVE_KEY.format(uid=int(user_id))
+
+
+def mark_replay_interactive_window(user_id: int, ttl_sec: int = 12) -> None:
+    """
+    Marca uma janela curta de replay interativo (cursor/play no painel).
+    """
+    uid = int(user_id or 0)
+    if uid <= 0:
+        return
+    cache.set(_replay_interactive_cache_key(uid), '1', timeout=max(2, int(ttl_sec)))
+
+
+def replay_interactive_window_open(user_id: int) -> bool:
+    uid = int(user_id or 0)
+    if uid <= 0:
+        return False
+    return cache.get(_replay_interactive_cache_key(uid)) is not None
+
+
+def clear_replay_interactive_window(user_id: int) -> None:
+    """Fecha imediatamente a janela interativa de replay (pause/scrub sem estratégias)."""
+    uid = int(user_id or 0)
+    if uid <= 0:
+        return
+    cache.delete(_replay_interactive_cache_key(uid))
+
+
 def _record_strategy_observer_thoughts(
     user,
     env: str,
@@ -498,19 +528,32 @@ def _dispatch_strategies_for_context(
     if not keys:
         return
     env = normalize_environment(trading_environment)
+    uid = int(getattr(user, 'id', 0) or 0) if user is not None else 0
+    if env == ENV_REPLAY and ctx.data_source == 'session_replay':
+        replay_force = bool(isinstance(ctx.extra, dict) and ctx.extra.get('replay_force'))
+        if not replay_force and not replay_interactive_window_open(uid):
+            return
     if ctx.data_source == 'live_tail':
         profile = execution_profile or resolve_active_profile(user, env)
         target = (getattr(profile, 'live_ticker', '') or '').strip().upper()
         current = (ctx.ticker or '').strip().upper()
-        # Modo estrito no ao vivo: só processa o ticker explicitamente selecionado.
-        if not target or not current or current != target:
+        # Ao vivo:
+        # - com ticker selecionado: modo estrito nesse ticker
+        # - sem ticker selecionado ("Todos"): aceita qualquer ticker monitorado no ciclo
+        if not current:
+            return
+        if target and current != target:
             return
     keys_run = list(keys)
     pause_passive = bool(getattr(settings, 'TRADER_PASSIVE_PAUSE_WHEN_OPEN_POSITION', False))
     if pause_passive:
         lane = 'replay_shadow' if (env == ENV_REPLAY and ctx.data_source == 'session_replay') else 'standard'
         sym = (ctx.ticker or '').strip().upper()
-        has_open = bool(sym) and has_open_position_for_ticker(sym, position_lane=lane)
+        has_open = bool(sym) and has_open_position_for_ticker(
+            sym,
+            trading_environment=env,
+            position_lane=lane,
+        )
         if has_open:
             keys_run = [k for k in keys if not is_passive_strategy(k)]
             if len(keys_run) != len(keys):
@@ -665,6 +708,10 @@ def run_automation_session_replay_now(
     uid = int(getattr(user, 'id', 0) or 0)
     if not uid:
         return
+    # Replay pausado no painel: não processa ciclo de estratégias/logs.
+    # ``force=True`` (stream manual) mantém execução explícita.
+    if not force and not replay_interactive_window_open(uid):
+        return
     if not runtime_enabled(user, env):
         return
     strat_map = _enabled_strategies_by_env_user()
@@ -711,6 +758,8 @@ def run_automation_session_replay_now(
     if replay_until is not None:
         candles = trim_candles_to_replay_until(candles, replay_until)
     ctx = _build_session_replay_context(sym, env, session_day, replay_until, candles)
+    if force and isinstance(ctx.extra, dict):
+        ctx.extra['replay_force'] = True
     _dispatch_strategies_for_context(user, env, ctx, keys, execution_profile=profile)
     if replay_until is not None:
         # Cursor monotônico em cache: evita escrita em SQLite a cada frame do replay.
@@ -743,6 +792,10 @@ def run_automation_after_quote_collect(
         iv = _interval_sec_from_settings()
 
     for env, user_to_keys in strat_map.items():
+        # Replay só deve executar por gatilho explícito (cursor/play/stream),
+        # nunca pelo ciclo periódico do watch Celery.
+        if env == ENV_REPLAY:
+            continue
         set_current_environment(env)
         uids = list(user_to_keys.keys())
         env_runtime_map = runtime_enabled_map(uids, env)
@@ -760,15 +813,20 @@ def run_automation_after_quote_collect(
             for uid in uids
             if uid in users and env == ENV_SIMULATOR and _sim_pref_active(prefs.get(uid))
         ]
-        users_replay_day = [
-            users[uid]
-            for uid in uids
-            if uid in users and env == ENV_REPLAY and _sim_pref_active(prefs.get(uid))
-        ]
+        # Replay não deve rodar em background no ciclo periódico do watch Celery.
+        # O processamento de replay deve ocorrer apenas por eventos explícitos:
+        # - cursor do replay (automation_sim_replay_cursor)
+        # - stream manual (stream_replay_ticks_task)
+        users_replay_day: list[User] = []
         users_live = [
             users[uid]
             for uid in uids
-            if uid in users and users[uid] not in users_sim_day and users[uid] not in users_replay_day
+            if (
+                uid in users
+                and env != ENV_REPLAY
+                and users[uid] not in users_sim_day
+                and users[uid] not in users_replay_day
+            )
         ]
 
         for u in users_sim_day:
@@ -852,12 +910,15 @@ def run_automation_after_quote_collect(
                 continue
             profile = slot.get('profile') or resolve_active_profile(u, env)
             target = (getattr(profile, 'live_ticker', '') or '').strip().upper()
-            # Modo estrito: robô ao vivo só opera no ticker explicitamente selecionado.
-            if not target:
-                continue
-            if target not in selected_live_set:
-                continue
-            user_symbols = [target]
+            # Ao vivo:
+            # - com ticker selecionado: opera apenas nele (se estiver monitorado)
+            # - sem ticker selecionado ("Todos"): opera em todos os monitorados da rodada
+            if target:
+                if target not in selected_live_set:
+                    continue
+                user_symbols = [target]
+            else:
+                user_symbols = list(selected_live)
 
             keys_once = [k for k in keys if strategy_celery_scope(k) == 'once']
             if keys_once:

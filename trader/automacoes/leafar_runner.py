@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import json
+import time
 from dataclasses import replace
 from typing import Any
 
@@ -21,6 +22,7 @@ from trader.automacoes.leafar_execution import (
     execute_leafar_bracket,
     execute_leafar_bracket_replay_shadow,
 )
+from trader.services.operations_history import register_trade_execution
 from trader.automacoes.execution_guard import (
     count_open_positions,
     has_open_position_for_ticker,
@@ -29,8 +31,13 @@ from trader.automacoes.execution_guard import (
     try_consume_order_slot_for_round,
 )
 from trader.automacoes.runtime import (
+    runtime_max_daily_orders,
     runtime_max_open_operations,
     runtime_max_position_units,
+)
+from trader.automacoes.order_limits import (
+    release_daily_order_budget,
+    try_consume_daily_order_budget,
 )
 from trader.automacoes.bracket_width import apply_bracket_distance_multipliers
 from trader.automacoes.session_range_bracket import (
@@ -67,11 +74,36 @@ from trader.environment import (
     order_api_mode_label,
 )
 from trader.models import AutomationThought, AutomationTriggerMarker, Position
+from trader.smart_trader_limits import extract_bmf_base
 from trader.trading_system.contracts.context import ObservationContext
 
 logger = logging.getLogger(__name__)
 _LEAFAR_OPEN_OP_KEY = 'leafar:open_op:v1'
 _LEAFAR_LOG_THROTTLE_KEY = 'leafar:log_throttle:v1'
+
+
+# region agent log
+def _agent_debug_log(
+    hypothesis_id: str,
+    location: str,
+    message: str,
+    data: dict[str, Any],
+) -> None:
+    try:
+        payload = {
+            'sessionId': 'c8b049',
+            'runId': 'replay-monitor-desync-v2',
+            'hypothesisId': hypothesis_id,
+            'location': location,
+            'message': message,
+            'data': data,
+            'timestamp': int(time.time() * 1000),
+        }
+        with open('/home/APICLEAR/.cursor/debug-c8b049.log', 'a', encoding='utf-8') as fh:
+            fh.write(json.dumps(payload, ensure_ascii=True) + '\n')
+    except Exception:
+        pass
+# endregion
 
 
 def _session_day_from_ctx(ctx: ObservationContext):
@@ -140,7 +172,14 @@ def _ensure_full_day_candles(
     return full or candles
 
 
-def _price_tick(price: float) -> float:
+def _price_tick(price: float, *, ticker: str | None = None) -> float:
+    base = extract_bmf_base(str(ticker or '').strip().upper()) if ticker else None
+    if base in ('WIN', 'IND'):
+        return 5.0
+    if base in ('WDO', 'DOL'):
+        return 0.5
+    if base == 'BIT':
+        return 5.0
     if price >= 1000:
         return 5.0
     if price >= 100:
@@ -234,7 +273,12 @@ def _major_volume_price(candles: list[dict[str, Any]]) -> float | None:
     return float((edges[idx] + edges[idx + 1]) / 2.0)
 
 
-def _adjust_levels_to_day_volume(sig, candles: list[dict[str, Any]]) -> tuple[float, float]:
+def _adjust_levels_to_day_volume(
+    sig,
+    candles: list[dict[str, Any]],
+    *,
+    ticker: str | None = None,
+) -> tuple[float, float]:
     """
     Alvo (gain): nível de maior volume no VP **na direção do trade** (íman — como o #1 no gráfico).
     Stop (perda): lado protetor (acima na venda, abaixo na compra), com folga mínima vs. distância ao alvo.
@@ -275,7 +319,7 @@ def _adjust_levels_to_day_volume(sig, candles: list[dict[str, Any]]) -> tuple[fl
                         cands.sort(key=lambda it: it[1], reverse=True)
                         target = float(cands[0][0])
 
-    tick = _price_tick(last)
+    tick = _price_tick(last, ticker=ticker)
     dist_target = abs(last - target)
     # Folga mínima maior + ancora opcional em LVN (menor volume) no lado do stop.
     min_stop_dist = max(tick * 28.0, dist_target * 0.92)
@@ -420,7 +464,7 @@ def _override_side_with_hvn_anchor(sig, passive_context: dict[str, Any] | None):
     parsed.sort(key=lambda it: it[1], reverse=True)
     major_px, major_vol = parsed[0]
     last = float(sig.last)
-    if abs(major_px - last) <= (_price_tick(last) * 0.75):
+    if abs(major_px - last) <= (_price_tick(last, ticker=sym) * 0.75):
         return sig, ''
     forced_side = 'Sell' if major_px < last else 'Buy'
     if str(sig.side).lower() == forced_side.lower():
@@ -433,7 +477,7 @@ def _override_side_with_hvn_anchor(sig, passive_context: dict[str, Any] | None):
     return new_sig, note
 
 
-def _override_side_with_day_hvn(sig, *, hvn1_price: float | None):
+def _override_side_with_day_hvn(sig, *, hvn1_price: float | None, ticker: str | None = None):
     """
     Regra principal da leafaR:
     - preço acima do HVN #1 do dia => SELL
@@ -443,7 +487,7 @@ def _override_side_with_day_hvn(sig, *, hvn1_price: float | None):
         return sig, ''
     last = float(sig.last)
     hvn1 = float(hvn1_price)
-    if abs(hvn1 - last) <= (_price_tick(last) * 0.75):
+    if abs(hvn1 - last) <= (_price_tick(last, ticker=ticker) * 0.75):
         return sig, ''
     forced_side = 'Sell' if hvn1 < last else 'Buy'
     if str(sig.side).lower() == forced_side.lower() and abs(float(sig.take_profit) - hvn1) <= 1e-9:
@@ -490,11 +534,27 @@ def _leafar_operation_state_alive(env: str, sym: str, lane: str, open_op: str | 
     """
     op = str(open_op or '').strip()
     if not op:
+        # region agent log
+        _agent_debug_log(
+            'H1',
+            'leafar_runner.py:_leafar_operation_state_alive',
+            'open_op missing',
+            {'ticker': sym, 'env': str(env), 'lane': str(lane)},
+        )
+        # endregion
         return False
     env_n = str(env or '').strip().lower() or 'simulator'
     lane_n = (lane or '').strip() or Position.Lane.STANDARD
     raw = cache.get(state_cache_key(sym, bracket_lane=lane_n, trading_environment=env_n))
     if not isinstance(raw, str) or not raw.strip():
+        # region agent log
+        _agent_debug_log(
+            'H1',
+            'leafar_runner.py:_leafar_operation_state_alive',
+            'state cache missing for open_op',
+            {'ticker': sym, 'env': env_n, 'lane': lane_n, 'open_op': op},
+        )
+        # endregion
         return False
     try:
         st = json.loads(raw)
@@ -503,11 +563,40 @@ def _leafar_operation_state_alive(env: str, sym: str, lane: str, open_op: str | 
     if not isinstance(st, dict):
         return False
     if bool(st.get('force_close_done')):
+        # region agent log
+        _agent_debug_log(
+            'H1',
+            'leafar_runner.py:_leafar_operation_state_alive',
+            'state force_close_done',
+            {'ticker': sym, 'env': env_n, 'lane': lane_n, 'open_op': op},
+        )
+        # endregion
         return False
     st_op = str(st.get('operation_id') or st.get('market_order_id') or '').strip()
     if not st_op or st_op != op:
+        # region agent log
+        _agent_debug_log(
+            'H1',
+            'leafar_runner.py:_leafar_operation_state_alive',
+            'operation id mismatch',
+            {'ticker': sym, 'env': env_n, 'lane': lane_n, 'open_op': op, 'state_op': st_op},
+        )
+        # endregion
         return False
-    return has_open_position_for_ticker(sym, position_lane=lane_n)
+    alive = has_open_position_for_ticker(
+        sym,
+        trading_environment=env_n,
+        position_lane=lane_n,
+    )
+    # region agent log
+    _agent_debug_log(
+        'H1',
+        'leafar_runner.py:_leafar_operation_state_alive',
+        'alive check result',
+        {'ticker': sym, 'env': env_n, 'lane': lane_n, 'open_op': op, 'alive': bool(alive)},
+    )
+    # endregion
+    return alive
 
 
 def _leafar_log_allowed(
@@ -546,16 +635,61 @@ def _leafar_try_heal_stale_open_position(env: str, sym: str, lane: str) -> int:
     )
     if not qs.exists():
         return 0
-    now = dj_tz.now()
     changed = 0
     for p in qs:
-        p.is_active = False
-        p.closed_at = now
-        p.quantity_open = Decimal('0')
-        p.save(update_fields=['is_active', 'closed_at', 'quantity_open', 'updated_at'])
-        changed += 1
+        try:
+            close_side = 'Sell' if p.side == Position.Side.LONG else 'Buy'
+            register_trade_execution(
+                ticker=sym,
+                side=close_side,
+                quantity=p.quantity_open,
+                price=p.avg_open_price,
+                source='leafar_stale_heal',
+                trading_environment=env_n,
+                position_lane=lane_n,
+            )
+            changed += 1
+            # region agent log
+            _agent_debug_log(
+                'H5',
+                'leafar_runner.py:_leafar_try_heal_stale_open_position',
+                'stale position closed with history',
+                {
+                    'ticker': sym,
+                    'env': env_n,
+                    'lane': lane_n,
+                    'position_id': int(p.id),
+                    'close_side': close_side,
+                    'qty': str(p.quantity_open),
+                    'price': str(p.avg_open_price),
+                },
+            )
+            # endregion
+        except Exception as exc:
+            # region agent log
+            _agent_debug_log(
+                'H5',
+                'leafar_runner.py:_leafar_try_heal_stale_open_position',
+                'stale position close failed',
+                {
+                    'ticker': sym,
+                    'env': env_n,
+                    'lane': lane_n,
+                    'position_id': int(p.id),
+                    'error': str(exc),
+                },
+            )
+            # endregion
     if changed > 0:
         _leafar_clear_open_operation(env_n, sym, lane_n)
+        # region agent log
+        _agent_debug_log(
+            'H2',
+            'leafar_runner.py:_leafar_try_heal_stale_open_position',
+            'stale positions force-closed',
+            {'ticker': sym, 'env': env_n, 'lane': lane_n, 'changed': int(changed)},
+        )
+        # endregion
     return changed
 
 
@@ -581,13 +715,44 @@ def _process_signal(
         last = float(candles[-1]['close'])
     except (TypeError, ValueError, KeyError, IndexError):
         return
+    try:
+        last_high = float(candles[-1].get('high'))
+    except (TypeError, ValueError, AttributeError):
+        last_high = last
+    try:
+        last_low = float(candles[-1].get('low'))
+    except (TypeError, ValueError, AttributeError):
+        last_low = last
     replay_sim = (not for_live_tail) and normalize_environment(env) == ENV_REPLAY
     trail_lane = BRACKET_LANE_REPLAY_SHADOW if replay_sim else BRACKET_LANE_STANDARD
     lane = 'replay_shadow' if replay_sim else 'standard'
     if trailing_stop_adjustment_enabled(
         user, env, execution_profile=execution_profile
     ):
-        trail_msg = try_trailing_stop_update(sym, last, bracket_lane=trail_lane)
+        t0_trail = time.perf_counter()
+        trail_msg = try_trailing_stop_update(
+            sym,
+            last,
+            bracket_lane=trail_lane,
+            trading_environment=env,
+            candle_high=last_high,
+            candle_low=last_low,
+        )
+        # region agent log
+        _agent_debug_log(
+            'H3',
+            'leafar_runner.py:_process_signal',
+            'trailing tick elapsed',
+            {
+                'ticker': sym,
+                'env': str(env),
+                'lane': str(lane),
+                'replay_sim': bool(replay_sim),
+                'elapsed_ms': round((time.perf_counter() - t0_trail) * 1000.0, 3),
+                'trail_msg': bool(trail_msg),
+            },
+        )
+        # endregion
         if trail_msg:
             try:
                 record_automation_thought(
@@ -596,12 +761,12 @@ def _process_signal(
             except Exception:
                 logger.exception('leafar thought trail')
 
-    sig = detect_leafar_signal(candles, **_leafar_detection_kwargs())
+    sig = detect_leafar_signal(candles, ticker=sym, **_leafar_detection_kwargs())
     if sig is None:
         return
     passive_ctx = (ctx.extra or {}).get('passive_context') if isinstance(ctx.extra, dict) else None
     major_vol_px = _major_volume_price(candles)
-    sig, hvn_day_note = _override_side_with_day_hvn(sig, hvn1_price=major_vol_px)
+    sig, hvn_day_note = _override_side_with_day_hvn(sig, hvn1_price=major_vol_px, ticker=sym)
     hvn_side_note = ''
     trend_label = ''
     trend_score = 0.0
@@ -620,7 +785,7 @@ def _process_signal(
         and opposes_trend
         and trend_score_abs >= max(0.05, _leafar_trend_bias_min_score())
     )
-    target_adj, stop_adj = _adjust_levels_to_day_volume(sig, candles)
+    target_adj, stop_adj = _adjust_levels_to_day_volume(sig, candles, ticker=sym)
     # Estratégia principal: alvo no HVN #1 do dia.
     if major_vol_px is not None and abs(float(major_vol_px)) > 0:
         target_adj = float(major_vol_px)
@@ -679,9 +844,36 @@ def _process_signal(
             except Exception:
                 logger.exception('leafar thought previous op lock')
         return
-    if has_open_position_for_ticker(sym, position_lane=lane):
+    if has_open_position_for_ticker(
+        sym,
+        trading_environment=env,
+        position_lane=lane,
+    ):
+        # region agent log
+        _agent_debug_log(
+            'H9',
+            'leafar_runner.py:_process_signal',
+            'entry blocked by open position',
+            {
+                'ticker': sym,
+                'env': str(env),
+                'lane': str(lane),
+                'total_open_qty': str(
+                    total_open_quantity_for_ticker(
+                        sym,
+                        trading_environment=env,
+                        position_lane=lane,
+                    )
+                ),
+            },
+        )
+        # endregion
         healed_after_block = _leafar_try_heal_stale_open_position(env, sym, lane)
-        if healed_after_block > 0 and not has_open_position_for_ticker(sym, position_lane=lane):
+        if healed_after_block > 0 and not has_open_position_for_ticker(
+            sym,
+            trading_environment=env,
+            position_lane=lane,
+        ):
             if _leafar_log_allowed(
                 env=env,
                 sym=sym,
@@ -733,7 +925,11 @@ def _process_signal(
     max_open_ops = runtime_max_open_operations(user, env)
     opened_now = count_open_positions(position_lane=lane)
     max_u = runtime_max_position_units(user, env)
-    total_u = total_open_quantity_for_ticker(sym, position_lane=lane)
+    total_u = total_open_quantity_for_ticker(
+        sym,
+        trading_environment=env,
+        position_lane=lane,
+    )
     if total_u >= max_u:
         if _leafar_log_allowed(
             env=env,
@@ -782,6 +978,23 @@ def _process_signal(
             except Exception:
                 logger.exception('leafar thought max open ops block')
         return
+    # region agent log
+    _agent_debug_log(
+        'H9',
+        'leafar_runner.py:_process_signal',
+        'pre execution limits snapshot',
+        {
+            'ticker': sym,
+            'env': str(env),
+            'lane': str(lane),
+            'opened_now': int(opened_now),
+            'max_open_ops': int(max_open_ops),
+            'max_position_units': str(max_u),
+            'total_units_ticker': str(total_u),
+            'order_qty_candidate': int(_quantity(user, env)),
+        },
+    )
+    # endregion
 
     summary = _leafar_summary(sym, sig, data_label)
     summary = summary.replace(
@@ -922,6 +1135,47 @@ def _process_signal(
         return
 
     slot_consumed = True
+    budget_consumed = False
+    weight = 0.55
+    if aligns_trend:
+        weight = min(0.95, 0.72 + min(0.2, max(0.0, trend_score_abs) * 0.35))
+    elif opposes_trend:
+        weight = 0.25
+    max_daily = runtime_max_daily_orders(user, env)
+    daily = try_consume_daily_order_budget(
+        user_id=int(getattr(user, 'id', 0) or 0),
+        trading_environment=env,
+        ticker=sym,
+        strategy_weight=weight,
+        user_daily_limit=max_daily,
+    )
+    if not daily.ok:
+        try:
+            release_order_slot_for_round(
+                user=user,
+                trading_environment=env,
+                execution_profile=execution_profile,
+                ctx=ctx,
+                strategy_key='leafar',
+            )
+        except Exception:
+            logger.exception('leafar release slot after daily budget block')
+        try:
+            record_automation_thought(
+                user,
+                env,
+                (
+                    f'leafaR [{data_label} · {sym}] bloqueado por orçamento diário: {daily.reason}. '
+                    f'Uso {daily.used}/{daily.limit}, peso={weight:.2f}, limiar={daily.required_weight:.2f}.'
+                )[:3900],
+                source='leafar',
+                kind=AutomationThought.Kind.NOTICE,
+                execution_profile=execution_profile,
+            )
+        except Exception:
+            logger.exception('leafar thought daily budget block')
+        return
+    budget_consumed = True
     qty = _quantity(user, env)
     sig_exec = replace(sig, take_profit=target_adj, stop_loss=stop_adj)
     api_lbl = order_api_mode_label()
@@ -937,7 +1191,13 @@ def _process_signal(
                 execution_profile=execution_profile,
             )
         else:
-            res = execute_leafar_bracket(sym, sig_exec, quantity=qty, user=user)
+            res = execute_leafar_bracket(
+                sym,
+                sig_exec,
+                quantity=qty,
+                user=user,
+                execution_profile=execution_profile,
+            )
         detail = ' | '.join(res.messages)
         if replay_sim:
             head = (
@@ -970,6 +1230,15 @@ def _process_signal(
                 )
             except Exception:
                 logger.exception('leafar release slot after failed execution')
+        if budget_consumed and not getattr(res, 'ok', False):
+            try:
+                release_daily_order_budget(
+                    user_id=int(getattr(user, 'id', 0) or 0),
+                    trading_environment=env,
+                    ticker=sym,
+                )
+            except Exception:
+                logger.exception('leafar release daily budget after failed execution')
         if getattr(res, 'ok', False):
             rid = str((res.market_resp or {}).get('Id') or (res.market_resp or {}).get('id') or '').strip()
             _leafar_track_open_operation(
@@ -1011,6 +1280,15 @@ def _process_signal(
                 )
             except Exception:
                 logger.exception('leafar release slot after exception')
+        if budget_consumed:
+            try:
+                release_daily_order_budget(
+                    user_id=int(getattr(user, 'id', 0) or 0),
+                    trading_environment=env,
+                    ticker=sym,
+                )
+            except Exception:
+                logger.exception('leafar release daily budget after exception')
         logger.warning('leafar execute %s', exc)
         try:
             record_automation_thought(
@@ -1038,11 +1316,11 @@ def run_leafar_for_context(ctx: ObservationContext, user, env: str) -> None:
     label = ctx.data_source or ctx.mode
     profile = resolve_active_profile(user, env) if user is not None else None
     live_target = (getattr(profile, 'live_ticker', '') or '').strip().upper()
-    # Defesa extra: no ao vivo, leafaR só processa o ticker explicitamente selecionado.
+    # Defesa extra no ao vivo:
+    # - com ticker selecionado: processa apenas ele
+    # - sem ticker selecionado ("Todos"): não bloqueia por símbolo
     if for_live:
-        if not live_target:
-            return
-        if live_target != sym:
+        if live_target and live_target != sym:
             return
     prof_id = int(getattr(profile, 'id', 0) or 0)
     started = getattr(profile, 'execution_started_at', None)

@@ -481,6 +481,10 @@ class AutomationRuntimePreference(models.Model):
         default=1,
         help_text='Máximo de operações abertas simultâneas para novas entradas das estratégias ativas.',
     )
+    max_daily_orders = models.PositiveSmallIntegerField(
+        default=10,
+        help_text='Máximo de ordens enviadas por dia para o ativo (respeita teto da corretora).',
+    )
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:

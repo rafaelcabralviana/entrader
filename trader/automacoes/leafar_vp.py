@@ -12,6 +12,7 @@ from datetime import datetime
 from typing import Any, Literal
 
 from trader.automacoes.session_range_bracket import session_high_low_from_candles
+from trader.smart_trader_limits import extract_bmf_base
 
 Side = Literal['Buy', 'Sell']
 
@@ -234,7 +235,14 @@ def _corridor_aggregate(vols_slice: list[float]) -> float:
     return float(s[0]) * 0.65 + float(s[1]) * 0.35
 
 
-def _price_tick(price: float) -> float:
+def _price_tick(price: float, *, ticker: str | None = None) -> float:
+    base = extract_bmf_base(str(ticker or '').strip().upper()) if ticker else None
+    if base in ('WIN', 'IND'):
+        return 5.0
+    if base in ('WDO', 'DOL'):
+        return 0.5
+    if base == 'BIT':
+        return 5.0
     if price >= 1000:
         return 5.0
     if price >= 100:
@@ -307,6 +315,7 @@ def _candle_dt(c: dict[str, Any]) -> datetime | None:
 def detect_leafar_signal(
     candles: list[dict[str, Any]],
     *,
+    ticker: str | None = None,
     num_bins: int = 24,
     min_bins_from_poc: int = 1,
     low_corridor_ratio: float = 0.38,
@@ -368,7 +377,7 @@ def detect_leafar_signal(
     sep_bins = abs(price_i - poc_i)
     vp_span = max(edges[-1] - edges[0], 1e-12)
     sep_price = abs(last - poc) / vp_span
-    tick = _price_tick(last)
+    tick = _price_tick(last, ticker=ticker)
     _, _, R, edge_room = _session_range_and_edge_room(
         candles, last, tick, vp_hi=edges[-1], vp_lo=edges[0]
     )
@@ -422,7 +431,7 @@ def detect_leafar_signal(
                 continue
         if highs and lows:
             recent_range = max(highs) - min(lows)
-            if recent_range < (_price_tick(last) * float(mrt)):
+            if recent_range < (_price_tick(last, ticker=ticker) * float(mrt)):
                 return None
 
     # Estabilidade do POC: exige o bin dominante consistente nas últimas barras.

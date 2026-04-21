@@ -7,7 +7,7 @@ from django.core.cache import cache
 from django.db.models import Q, Sum
 from django.utils import timezone as dj_tz
 
-from trader.environment import get_current_environment
+from trader.environment import get_current_environment, normalize_environment
 from trader.models import Position
 
 _MIN_EFFECTIVE_OPEN_QTY = Decimal('0.000001')
@@ -17,12 +17,17 @@ _MIN_EFFECTIVE_OPEN_PRICE = Decimal('0.000001')
 def has_open_position_for_ticker(
     ticker: str,
     *,
+    trading_environment: str | None = None,
     position_lane: str = Position.Lane.STANDARD,
 ) -> bool:
     sym = (ticker or '').strip().upper()
     if not sym:
         return False
-    env = get_current_environment()
+    env = (
+        normalize_environment(trading_environment)
+        if trading_environment is not None
+        else get_current_environment()
+    )
     # Considera posição aberta por estado/quantidade e preço médio válido.
     # Linhas antigas com preço médio zerado são tratadas como resíduos inválidos.
     return Position.objects.filter(
@@ -40,6 +45,7 @@ def has_open_position_for_ticker(
 def total_open_quantity_for_ticker(
     ticker: str,
     *,
+    trading_environment: str | None = None,
     position_lane: str = Position.Lane.STANDARD,
 ) -> Decimal:
     """
@@ -48,7 +54,11 @@ def total_open_quantity_for_ticker(
     sym = (ticker or '').strip().upper()
     if not sym:
         return Decimal('0')
-    env = get_current_environment()
+    env = (
+        normalize_environment(trading_environment)
+        if trading_environment is not None
+        else get_current_environment()
+    )
     agg = (
         Position.objects.filter(
             ticker=sym,

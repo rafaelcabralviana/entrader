@@ -851,6 +851,8 @@
       if (document.visibilityState === 'hidden') return false;
       if (window.__ENTRADE_LIVE_CHART_POLL_PAUSED__) return false;
       if (window.__ENTRADE_REPLAY_LOG_POLL_SUPPRESS__ === true) return false;
+      // Em Replay, só faz poll de pensamentos enquanto o relógio virtual está a correr.
+      if (window.__ENTRADE_REPLAY_MODE__ && window.__ENTRADE_REPLAY_PLAYING__ !== true) return false;
     } catch (ePoll) {}
     return true;
   }
@@ -921,6 +923,8 @@
     })
       .then(function(r) { if (!r.ok) throw new Error('HTTP'); return r.json(); })
       .then(function(data) {
+        // Se pausou durante o fetch, descarta a resposta atrasada.
+        if (!automationThoughtsPollAllowed()) return;
         var rows = data && data.thoughts ? data.thoughts : [];
         rows.forEach(function(t) {
           if (t && t.id != null && t.id > lastId) {

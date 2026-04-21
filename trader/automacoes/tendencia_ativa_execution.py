@@ -5,12 +5,15 @@ from __future__ import annotations
 import logging
 from decimal import Decimal
 from typing import Any
+from django.utils import timezone as dj_tz
 
 from trader.automacoes.execution_guard import release_market_entry_lock, try_acquire_market_entry_lock
+from trader.automacoes.universal_bracket_trailing import BRACKET_LANE_REPLAY_SHADOW, state_cache_key
 from trader.automacoes.market_entry_trailing import (
     stage_market_entry_for_trailing,
     stage_replay_entry_for_trailing,
 )
+from trader.automacoes.order_limits import clamp_quantity_to_ticket_limit
 from trader.custody_simulator import record_bracket_execution_marker
 from trader.environment import (
     ENV_REPLAY,
@@ -55,7 +58,7 @@ def execute_trend_ativa_bracket(
     Com ``log_user`` + ``log_environment`` grava linha **NOTICE** no painel de automações (ids API).
     """
     sym = (ticker or '').strip().upper()
-    qty = max(1, int(quantity))
+    qty = clamp_quantity_to_ticket_limit(sym, max(1, int(quantity)))
     env_cur = get_current_environment()
     uid = int(getattr(log_user, 'id', 0) or 0)
     locked = False
@@ -81,6 +84,7 @@ def execute_trend_ativa_bracket(
             position_lane=Position.Lane.STANDARD,
             market_sender=post_send_market_order,
             user=log_user,
+            execution_profile=log_execution_profile,
             trading_environment=env_cur,
         )
         if not staged.ok:
@@ -140,10 +144,13 @@ def execute_trend_ativa_bracket(
 
         if should_record_local_history('market', mkt_resp):
             try:
+                exec_px = staged.executed_price
                 hist = infer_execution_price(
                     {'Ticker': sym, 'Side': side, 'Quantity': qty},
                     mkt_resp,
                 )
+                if exec_px is not None:
+                    hist = Decimal(str(exec_px))
                 register_trade_execution(
                     ticker=sym,
                     side=side,
@@ -153,6 +160,22 @@ def execute_trend_ativa_bracket(
                     trading_environment=get_current_environment(),
                     position_lane=Position.Lane.STANDARD,
                 )
+                try:
+                    from trader.models import AutomationTriggerMarker
+
+                    if log_user is not None:
+                        AutomationTriggerMarker.objects.create(
+                            user=log_user,
+                            execution_profile=log_execution_profile,
+                            trading_environment=env_cur,
+                            ticker=sym,
+                            strategy_key='trade_entry',
+                            marker_at=dj_tz.now(),
+                            price=hist,
+                            message=f'source=tendencia_mercado_ativa;side={side};qty={qty};market_id={mkt_id}'[:500],
+                        )
+                except Exception:
+                    logger.exception('trend_ativa entry marker create')
             except Exception:
                 logger.exception('trend_ativa register_trade_execution')
 
@@ -186,7 +209,7 @@ def execute_trend_ativa_bracket_replay_shadow(
     Não chama a corretora (a API não aceita preço fictício alinhado ao dia histórico).
     """
     sym = (ticker or '').strip().upper()
-    qty = max(1, int(quantity))
+    qty = clamp_quantity_to_ticket_limit(sym, max(1, int(quantity)))
     env_n = normalize_environment(log_environment) if log_environment else get_current_environment()
     uid = int(getattr(log_user, 'id', 0) or 0)
     locked = False
@@ -211,6 +234,7 @@ def execute_trend_ativa_bracket_replay_shadow(
             strategy_source='tendencia_mercado_ativa',
             position_lane=Position.Lane.REPLAY_SHADOW,
             user=log_user,
+            execution_profile=log_execution_profile,
             trading_environment=env_n,
         )
         if not staged.ok:
@@ -241,6 +265,53 @@ def execute_trend_ativa_bracket_replay_shadow(
             except Exception:
                 logger.exception('trend_ativa replay shadow thought')
 
+        try:
+            register_trade_execution(
+                ticker=sym,
+                side=side,
+                quantity=qty,
+                price=Decimal(str(staged.executed_price or _round_px(last))),
+                source='tendencia_mercado_ativa_replay',
+                trading_environment=env_n,
+                position_lane=Position.Lane.REPLAY_SHADOW,
+            )
+            try:
+                from trader.models import AutomationTriggerMarker
+
+                if log_user is not None:
+                    AutomationTriggerMarker.objects.create(
+                        user=log_user,
+                        execution_profile=log_execution_profile,
+                        trading_environment=env_n,
+                        ticker=sym,
+                        strategy_key='trade_entry',
+                        marker_at=dj_tz.now(),
+                        price=Decimal(str(staged.executed_price or _round_px(last))),
+                        message=f'source=tendencia_mercado_ativa_replay;side={side};qty={qty};market_id={mkt_id}'[:500],
+                    )
+            except Exception:
+                logger.exception('trend_ativa replay entry marker create')
+            try:
+                from trader.panel_context import invalidate_collateral_custody_cache
+
+                invalidate_collateral_custody_cache()
+            except Exception:
+                logger.exception('trend_ativa invalidate custody cache replay')
+        except Exception:
+            logger.exception('trend_ativa register_trade_execution replay')
+            try:
+                from django.core.cache import cache
+
+                cache.delete(
+                    state_cache_key(
+                        sym,
+                        bracket_lane=BRACKET_LANE_REPLAY_SHADOW,
+                        trading_environment=env_n,
+                    )
+                )
+            except Exception:
+                logger.exception('trend_ativa rollback trailing state replay')
+            return False
         if get_current_environment() in (ENV_SIMULATOR, ENV_REPLAY):
             try:
                 record_bracket_execution_marker(
@@ -254,19 +325,6 @@ def execute_trend_ativa_bracket_replay_shadow(
                 )
             except Exception:
                 logger.exception('trend_ativa custody marker replay')
-
-        try:
-            register_trade_execution(
-                ticker=sym,
-                side=side,
-                quantity=qty,
-                price=Decimal(str(_round_px(last))),
-                source='tendencia_mercado_ativa_replay',
-                trading_environment=get_current_environment(),
-                position_lane=Position.Lane.REPLAY_SHADOW,
-            )
-        except Exception:
-            logger.exception('trend_ativa register_trade_execution replay')
 
         return True
     finally:

@@ -412,6 +412,11 @@
     {% if nav_section == 'automations' %}<div class="automation-log-chart-focus">{% endif %}
     {% block dashboard_preface %}{% endblock %}
     <section id="mercado" class="section-wrap{% if nav_section == 'automations' %} automation-mercado-highlight{% endif %}">
+      {% if user.is_authenticated and nav_section == 'automations' %}
+      <div class="api-data-duo" id="api-data-duo" style="margin:0 0 .65rem;">
+        {% include "trader/partials/collateral_custody_fragment_inner.html" %}
+      </div>
+      {% endif %}
       <div class="market-chart-split">
         <section id="candles" class="section-wrap candles-wrap">
           <h2 class="section-h">Candles e volume (histórico salvo)</h2>

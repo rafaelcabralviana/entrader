@@ -3,11 +3,15 @@
   var FRAG = "{% url 'trader:collateral_custody_fragment' %}";
   var SNAPSHOT_URL = "{% url 'trader:market_snapshot_json' %}";
   // Atualização mais rápida sem ficar agressivo (quote/busca externa tem limites).
-  var POLL_MS = 6500;
+  var POLL_MS = 3000;
+  var REPLAY_POLL_MS = 1200;
+  var FORCE_REFRESH_MIN_GAP_MS = 900;
+  var REPLAY_CURSOR_REFRESH_MIN_GAP_MS = 60;
   var bootTimer = null;
   var pollTimer = null;
   var financePollPaused = false;
   var CUSTODY_TAB_KEY = 'entrade_custody_dual_src';
+  var lastForceRefreshTs = 0;
 
   /**
    * Sincroniza abas Corretora vs Replay fictício após cada refresh do strip.
@@ -80,10 +84,15 @@
   }
   window.__ENTRADE_SYNC_CUSTODY_DUAL_TAB__ = syncCustodyDualTab;
 
-  function refreshFinanceStrip() {
+  function refreshFinanceStrip(opts) {
+    var replayUntil = opts && opts.replayUntil ? String(opts.replayUntil).trim() : '';
     var el = document.getElementById('api-data-duo');
     if (!el) return;
-    fetch(FRAG + '?t=' + Date.now(), {
+    var url = FRAG + '?t=' + Date.now();
+    if (replayUntil) {
+      url += '&replay_until=' + encodeURIComponent(replayUntil);
+    }
+    fetch(url, {
       credentials: 'same-origin',
       headers: { 'Accept': 'text/html' }
     })
@@ -109,6 +118,13 @@
   /** Só atualiza garantias/custódia quando o snapshot indica pregão ativo (alinhado ao painel de mercado). */
   function tickFinanceStrip() {
     if (document.visibilityState !== 'visible' || financePollPaused) return;
+    try {
+      // Em replay, a custódia passa a ser sincronizada só por evento de cursor virtual.
+      if (window.__ENTRADE_REPLAY_MODE__ === true) return;
+    } catch (eRpTick) {}
+    try {
+      if (window.__ENTRADE_REPLAY_MODE__ === true && window.__ENTRADE_REPLAY_PLAYING__ !== true) return;
+    } catch (eRpPause) {}
     fetch(SNAPSHOT_URL + '?t=' + Date.now(), {
       credentials: 'same-origin',
       headers: { 'Accept': 'application/json' }
@@ -134,14 +150,45 @@
 
   function startPolling() {
     if (financePollPaused) return;
+    try {
+      // Hard sync replay: sem poll periódico no replay.
+      if (window.__ENTRADE_REPLAY_MODE__ === true) return;
+    } catch (eRpStart) {}
     if (pollTimer) clearInterval(pollTimer);
-    pollTimer = setInterval(tickFinanceStrip, POLL_MS);
+    var isReplayMode = false;
+    try {
+      isReplayMode = window.__ENTRADE_REPLAY_MODE__ === true;
+    } catch (eRpM) {}
+    var intervalMs = isReplayMode ? REPLAY_POLL_MS : POLL_MS;
+    pollTimer = setInterval(tickFinanceStrip, intervalMs);
+  }
+
+  function forceRefreshFinanceStrip(opts) {
+    var bypassReplayPlayGate = !!(opts && opts.bypassReplayPlayGate);
+    var replayUntil = opts && opts.replayUntil ? String(opts.replayUntil).trim() : '';
+    var now = Date.now();
+    var minGap = replayUntil ? REPLAY_CURSOR_REFRESH_MIN_GAP_MS : FORCE_REFRESH_MIN_GAP_MS;
+    if (now - lastForceRefreshTs < minGap) return;
+    lastForceRefreshTs = now;
+    try {
+      if (!bypassReplayPlayGate && window.__ENTRADE_REPLAY_MODE__ === true && window.__ENTRADE_REPLAY_PLAYING__ !== true) return;
+    } catch (eRpForce) {}
+    if (document.visibilityState === 'visible') {
+      // Em replay por cursor, atualiza mesmo com poll pausado.
+      refreshFinanceStrip({ replayUntil: replayUntil });
+    }
   }
 
   function boot() {
     syncCustodyDualTab();
     refreshFinanceStrip();
-    bootTimer = setTimeout(tickFinanceStrip, 3200);
+    try {
+      if (window.__ENTRADE_REPLAY_MODE__ !== true) {
+        bootTimer = setTimeout(tickFinanceStrip, 3200);
+      }
+    } catch (eRpBoot) {
+      bootTimer = setTimeout(tickFinanceStrip, 3200);
+    }
     startPolling();
   }
 
@@ -174,6 +221,16 @@
       return;
     }
     refreshFinanceStrip();
+  });
+
+  window.addEventListener('entrade:replay-cursor-applied', function(ev) {
+    // Cursor de replay mudou: custódia deve refletir o mesmo instante virtual,
+    // mesmo em pausa/arrasto (strategies=0, replay_playing=false).
+    var replayUntil = '';
+    try {
+      replayUntil = String((ev && ev.detail && ev.detail.replay_until) || '').trim();
+    } catch (eRd) {}
+    forceRefreshFinanceStrip({ bypassReplayPlayGate: true, replayUntil: replayUntil });
   });
 })();
 </script>

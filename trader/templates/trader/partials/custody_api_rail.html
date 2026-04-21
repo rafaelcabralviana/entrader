@@ -83,6 +83,11 @@
         </form>
         {% endif %}
       </div>
+      <p class="api-data-card__meta" style="margin:0 0 0.35rem;font-size:0.72rem;">
+        <strong>Cursor replay (cálculo):</strong> {{ replay_shadow_custody_panel.replay_cursor_brt }}
+        <span style="opacity:.82;"> | </span>
+        <strong>Última marca usada no P/L:</strong> {{ replay_shadow_custody_panel.mark_asof_brt }}
+      </p>
       {% if replay_shadow_custody_panel.active_unreal_total_show %}
       <p class="api-data-card__meta" style="margin:0 0 0.35rem;font-size:0.74rem;">
         <strong>P/L não real. (replay, todas abertas):</strong>

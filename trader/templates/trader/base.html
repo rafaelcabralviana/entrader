@@ -1175,7 +1175,7 @@
         </div>
         {% endif %}
       </header>
-      {% if user.is_authenticated and nav_section != 'celery_tests' and nav_section != 'hub' %}
+      {% if user.is_authenticated and nav_section != 'celery_tests' and nav_section != 'hub' and nav_section != 'automations' %}
       <div class="api-data-duo" id="api-data-duo">
         {% include "trader/partials/collateral_custody_fragment_inner.html" %}
       </div>

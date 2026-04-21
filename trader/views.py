@@ -60,7 +60,12 @@ from trader.automacoes.profiles import (
     set_active_profile,
     start_profile_runtime,
 )
-from trader.automacoes.runtime import runtime_enabled, runtime_max_open_operations, set_runtime_enabled
+from trader.automacoes.runtime import (
+    runtime_enabled,
+    runtime_max_daily_orders,
+    runtime_max_open_operations,
+    set_runtime_enabled,
+)
 from trader.automacoes.strategies import AUTOMATION_STRATEGIES, strategy_display_dict
 from trader.automacoes.simulation import (
     clear_all_market_day_sessions,
@@ -106,6 +111,7 @@ from trader.services.operations_history import (
     register_trade_execution,
     should_record_local_history,
 )
+from trader.automacoes.execution_simulation import simulate_non_real_fill
 from trader.services.quote_history import compute_quote_latency_ms, save_quote_snapshot
 from trader.services.replay_shadow_ledger import delete_replay_shadow_ledger
 from trader.services.orders import (
@@ -1321,6 +1327,7 @@ def quote_candles_json(request):
             execution_profile=active_profile,
         )
         enabled_strategy_keys = [k for k, v in enabled_map.items() if bool(v)]
+        chart_aux_marker_keys = ['trade_entry', 'trade_exit']
         aqs = AutomationTriggerMarker.objects.filter(
             user=request.user,
             trading_environment=env,
@@ -1330,9 +1337,12 @@ def quote_candles_json(request):
             marker_at__lt=to_dt,
         )
         if enabled_strategy_keys:
-            aqs = aqs.filter(strategy_key__in=enabled_strategy_keys)
+            aqs = aqs.filter(
+                Q(strategy_key__in=enabled_strategy_keys)
+                | Q(strategy_key__in=chart_aux_marker_keys)
+            )
         else:
-            aqs = aqs.none()
+            aqs = aqs.filter(strategy_key__in=chart_aux_marker_keys)
         started = getattr(active_profile, 'execution_started_at', None)
         if started is not None:
             aqs = aqs.filter(created_at__gte=started)
@@ -1491,16 +1501,18 @@ def quote_candles_json(request):
                 return lo <= v <= hi
             return True
 
-        def _br_price_pos(key: str) -> float | None:
+        def _br_price_pos(key: str, *, enforce_reasonable: bool = True) -> float | None:
             v = _br_float(key)
             if v is None or v <= 0:
                 return None
-            if not _is_reasonable_price(v):
+            if enforce_reasonable and not _is_reasonable_price(v):
                 return None
             return v
 
-        tp_p = _br_price_pos('tp_price')
-        sl_t = _br_price_pos('sl_trigger')
+        # Para TP/SL de trailing, não filtra agressivamente por faixa "razoável":
+        # o front já limita escala no foco trailing e evita perder visualização.
+        tp_p = _br_price_pos('tp_price', enforce_reasonable=False)
+        sl_t = _br_price_pos('sl_trigger', enforce_reasonable=False)
         entry_a = _br_price_pos('entry_anchor')
         if entry_a is None:
             try:
@@ -1515,8 +1527,13 @@ def quote_candles_json(request):
             'Buy' if pos_open.side == Position.Side.LONG else 'Sell'
         )
         entry_side = str(st_br.get('entry_side') or '').strip() or side_from_pos
-        if tp_p is None and sl_t is None and entry_a is None:
-            continue
+        if entry_side not in ('Buy', 'Sell') or entry_side != side_from_pos:
+            entry_side = side_from_pos
+        if entry_a is None:
+            try:
+                entry_a = float(pos_open.avg_open_price)
+            except (TypeError, ValueError):
+                entry_a = None
         bracket_lanes.append(
             {
                 'lane': lane,
@@ -1525,7 +1542,7 @@ def quote_candles_json(request):
                 'operation_id': (str(st_br.get('operation_id') or st_br.get('market_order_id') or '').strip() or None),
                 'tp_price': tp_p,
                 'sl_trigger': sl_t,
-                'sl_order_price': _br_price_pos('sl_order_price'),
+                'sl_order_price': _br_price_pos('sl_order_price', enforce_reasonable=False),
                 'entry_anchor': entry_a,
                 'last': last_px,
                 'peak': _br_float('peak'),
@@ -1639,11 +1656,19 @@ def liquidate_single_asset(request):
         hist_price = infer_execution_price(body, resp)
         if should_record_local_history('market', resp):
             try:
+                sim = simulate_non_real_fill(
+                    trading_environment=get_current_environment(),
+                    side=str(body.get('Side') or ''),
+                    reference_price=float(hist_price or 0.01),
+                    is_exit=True,
+                )
+                if not sim.filled:
+                    raise ValueError(sim.reason or 'Liquidação sem execução simulada.')
                 register_trade_execution(
                     ticker=ticker,
                     side=str(body.get('Side') or ''),
                     quantity=body.get('Quantity') or 0,
-                    price=hist_price,
+                    price=sim.price,
                     source='liquidate_single',
                     trading_environment=get_current_environment(),
                 )
@@ -1704,11 +1729,19 @@ def liquidate_all_assets(request):
             hist_price = infer_execution_price(body, resp)
             if should_record_local_history('market', resp):
                 try:
+                    sim = simulate_non_real_fill(
+                        trading_environment=get_current_environment(),
+                        side=str(body.get('Side') or ''),
+                        reference_price=float(hist_price or 0.01),
+                        is_exit=True,
+                    )
+                    if not sim.filled:
+                        raise ValueError(sim.reason or 'Liquidação sem execução simulada.')
                     register_trade_execution(
                         ticker=ticker,
                         side=str(body.get('Side') or ''),
                         quantity=body.get('Quantity') or 0,
-                        price=hist_price,
+                        price=sim.price,
                         source='liquidate_all',
                         trading_environment=get_current_environment(),
                     )
@@ -1981,6 +2014,10 @@ def automations_dashboard(request):
             max_open_ops = int(request.POST.get('max_open_operations') or '1')
         except (TypeError, ValueError):
             max_open_ops = 1
+        try:
+            max_daily_orders = int(request.POST.get('max_daily_orders') or '10')
+        except (TypeError, ValueError):
+            max_daily_orders = 10
         live_ticker_selected = (request.POST.get('automation_live_ticker') or '').strip().upper()
         watch_tickers = set(_watch_tickers_list())
         if live_ticker_selected and live_ticker_selected not in watch_tickers:
@@ -1997,18 +2034,22 @@ def automations_dashboard(request):
             runtime_env,
             enabled=target_enabled,
             max_open_operations=max_open_ops,
+            max_daily_orders=max_daily_orders,
         )
         max_open_final = int(getattr(row_rt, 'max_open_operations', max_open_ops) or 1)
+        max_daily_final = int(getattr(row_rt, 'max_daily_orders', max_daily_orders) or 10)
         ticker_line = live_ticker_selected or 'todos os monitorados'
         if action in ('save_limit', 'save_all'):
             thought_msg = (
                 f'Configuração do robô guardada ({environment_label(runtime_env)}). '
                 f'Estado: {"ligado" if target_enabled else "desligado"}. '
-                f'Máx. operações abertas: {max_open_final}. Ticker: {ticker_line}.'
+                f'Máx. operações abertas: {max_open_final}. '
+                f'Máx. ordens/dia: {max_daily_final}. Ticker: {ticker_line}.'
             )
             user_msg = (
                 f'Definições guardadas para {environment_label(runtime_env)}. '
-                f'Limite: {max_open_final}. Ticker: {ticker_line}. '
+                f'Limite abertas: {max_open_final}. '
+                f'Limite ordens/dia: {max_daily_final}. Ticker: {ticker_line}. '
                 f'Robô: {"ativo" if target_enabled else "inativo"}.'
             )
         else:
@@ -2016,12 +2057,14 @@ def automations_dashboard(request):
                 f'Robô de automações {"ATIVADO" if target_enabled else "DESATIVADO"} '
                 f'no ambiente {environment_label(runtime_env)}. '
                 f'Máx. operações abertas simultâneas: {max_open_final}. '
+                f'Máx. ordens enviadas no dia: {max_daily_final}. '
                 f'Ticker de execução: {ticker_line}.'
             )
             user_msg = (
                 f'Robô {"ativado" if target_enabled else "desativado"} '
                 f'para {environment_label(runtime_env)}. '
-                f'Limite: {max_open_final}. Ticker do bot: {ticker_line}.'
+                f'Limite abertas: {max_open_final}. '
+                f'Limite ordens/dia: {max_daily_final}. Ticker do bot: {ticker_line}.'
             )
         record_automation_thought(
             request.user,
@@ -2103,6 +2146,7 @@ def automations_dashboard(request):
         ),
         'automation_robot_enabled': runtime_enabled(request.user, env),
         'automation_max_open_operations': runtime_max_open_operations(request.user, env),
+        'automation_max_daily_orders': runtime_max_daily_orders(request.user, env),
         'automation_environment_value': env,
         'replay_fiction_profile': _replay_shadow_custody_panel(request)
         if env == ENV_REPLAY
@@ -2403,6 +2447,7 @@ def automations_state_json(request):
             },
             'robot_enabled': runtime_enabled(request.user, env),
             'max_open_operations': runtime_max_open_operations(request.user, env),
+            'max_daily_orders': runtime_max_daily_orders(request.user, env),
         }
     )
 
@@ -2678,6 +2723,11 @@ def automation_sim_replay_cursor(request):
         if not wrote:
             # Não derruba o replay por lock transitório de escrita.
             pass
+        try:
+            # Sincroniza a faixa de custódia ao mesmo relógio virtual do replay.
+            invalidate_collateral_custody_cache()
+        except Exception:
+            logger.exception('automation_sim_replay_cursor: invalidate collateral/custody cache')
     want_strategies = (request.POST.get('strategies', '1') or '1').strip().lower() not in (
         '0',
         'false',
@@ -2685,38 +2735,28 @@ def automation_sim_replay_cursor(request):
         'off',
     )
     try:
-        from trader.automacoes.automation_engine import run_automation_session_replay_now
+        from trader.automacoes.automation_engine import (
+            clear_replay_interactive_window,
+            mark_replay_interactive_window,
+            run_automation_session_replay_now,
+        )
 
         if want_strategies and sd is not None and sym:
-            # Replay pode avançar em frames muito curtos (1s); para manter comportamento
-            # próximo ao "tempo real", dispara estratégias apenas quando muda o bucket
-            # do intervalo do motor (ex.: 10s), evitando rajadas de alertas.
-            iv_raw = getattr(settings, 'TRADER_LEAFAR_INTERVAL_SEC', 10)
-            try:
-                iv = max(1, min(int(iv_raw), 300))
-            except (TypeError, ValueError):
-                iv = 10
-
-            should_dispatch = True
-            if dt is not None:
-                bucket = int(dt.timestamp()) // iv
-                ck = (
-                    f'automation:replay_cursor:last_bucket:'
-                    f'{request.user.id}:{session_env}:{sym}:{sd.isoformat()}'
-                )
-                prev = cache.get(ck)
-                should_dispatch = prev != bucket
-                if should_dispatch:
-                    cache.set(ck, bucket, timeout=12 * 3600)
-
-            if should_dispatch:
-                run_automation_session_replay_now(
-                    request.user,
-                    session_day=sd,
-                    sim_ticker=sym,
-                    replay_until=dt,
-                    trading_environment=ENV_REPLAY,
-                )
+            # Marca replay interativo para permitir execução do instante atual.
+            mark_replay_interactive_window(int(getattr(request.user, 'id', 0) or 0))
+            # No replay interativo (scrubber/play), trailing precisa reagir ao cursor atual
+            # sem "pular" por bucket; portanto executa o motor em cada atualização com
+            # strategies=true. O pause já suprime chamadas no frontend.
+            run_automation_session_replay_now(
+                request.user,
+                session_day=sd,
+                sim_ticker=sym,
+                replay_until=dt,
+                trading_environment=ENV_REPLAY,
+            )
+        else:
+            # Pause/scrub sem estratégias: fecha a janela para bloquear execuções atrasadas.
+            clear_replay_interactive_window(int(getattr(request.user, 'id', 0) or 0))
     except Exception:
         logger.exception('automation_sim_replay_cursor: motor de estratégias no instante do replay')
 

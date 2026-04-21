@@ -43,10 +43,29 @@ window.__ENTRADE_AUTOMATION_SIM__ = {
     loadingOverlay.setAttribute('aria-busy', on ? 'true' : 'false');
   }
 
+  function replayEngineInfoText() {
+    try {
+      var cfg = window.__ENTRADE_AUTOMATION_SIM__;
+      if (!cfg || !cfg.session_date_iso) return '';
+      var engineTicker = String(cfg.sim_ticker || '').trim().toUpperCase();
+      var uiTicker = String((tickerInput && tickerInput.value) || '').trim().toUpperCase();
+      var dayIso = String(cfg.session_date_iso || '').trim().slice(0, 10);
+      if (!engineTicker) return ' | replay ativo (ticker do motor indisponível)';
+      if (uiTicker && uiTicker !== engineTicker) {
+        return ' | replay motor=' + engineTicker + ' dia=' + dayIso + ' [ATENCAO: grafico em ' + uiTicker + ']';
+      }
+      return ' | replay motor=' + engineTicker + ' dia=' + dayIso;
+    } catch (eRI) {
+      return '';
+    }
+  }
+
   var lastCandles = null;
   var lastStatusChanges = [];
   var allTradeMarkers = [];
   var allStrategyMarkers = [];
+  // Teste visual: oculta linhas/labels de stop no gráfico sem alterar o motor de trailing.
+  var HIDE_STOP_MARKERS = false;
   /** Estado de bracket no cache (TP / SL com trailing) — mesmo ticker do gráfico. */
   var allBracketLive = null;
   /** Histórico local de preços TP/SL/entrada para mostrar «rastro» do trailing (modo foco). */
@@ -58,7 +77,7 @@ window.__ENTRADE_AUTOMATION_SIM__ = {
    */
   var BRACKET_LIVE_HOLD_MAX_MISSES = 12;
   var BRACKET_LIVE_HOLD_MS = 45000;
-  var BRACKET_FOCUS_STICKY_MS = 12000;
+  var BRACKET_FOCUS_STICKY_MS = 0;
   var bracketLiveHold = null;
   var bracketLiveMissCount = 0;
   var bracketLiveHoldUntilTs = 0;
@@ -305,7 +324,16 @@ window.__ENTRADE_AUTOMATION_SIM__ = {
    */
   function shouldPollCandlesChart() {
     if (isReplayCandles()) return false;
+    if (isReplayPaused()) return false;
     return !!sessionDateSelect;
+  }
+
+  function isReplayPaused() {
+    try {
+      return window.__ENTRADE_REPLAY_MODE__ && window.__ENTRADE_REPLAY_PAUSED__ === true;
+    } catch (eRpState) {
+      return false;
+    }
   }
 
   function candlesPollIntervalMs() {
@@ -332,10 +360,20 @@ window.__ENTRADE_AUTOMATION_SIM__ = {
     var nowTs = Date.now();
     var b = raw || null;
     var lanes = (b && b.lanes) ? b.lanes : [];
+    var replayMode = false;
+    try { replayMode = window.__ENTRADE_REPLAY_MODE__ === true; } catch (eRm) {}
     if (lanes.length) {
       bracketLiveHold = b;
       bracketLiveMissCount = 0;
       bracketLiveHoldUntilTs = nowTs + BRACKET_LIVE_HOLD_MS;
+      allBracketLive = b;
+      return;
+    }
+    if (replayMode) {
+      // Em replay, ao fechar operação deve sair do modo trailing imediatamente.
+      bracketLiveHold = null;
+      bracketLiveMissCount = 0;
+      bracketLiveHoldUntilTs = 0;
       allBracketLive = b;
       return;
     }
@@ -537,7 +575,22 @@ window.__ENTRADE_AUTOMATION_SIM__ = {
       max = Math.max(max, candles[i].high);
       maxVol = Math.max(maxVol, candles[i].volume || 0);
     }
+    var candlesMin = min;
+    var candlesMax = max;
+    var candlesMid = (candlesMin + candlesMax) / 2;
+    var candlesSpan = Math.max(1e-9, candlesMax - candlesMin);
     var blLanes = (bracketLive && bracketLive.lanes) ? bracketLive.lanes : [];
+    // Evita conflito visual entre lanes de ledgers diferentes (ex.: replay vs standard).
+    var replayLanes = [];
+    var nonReplayLanes = [];
+    for (var blx = 0; blx < blLanes.length; blx++) {
+      var blLane = blLanes[blx] || {};
+      if (String(blLane.lane || '').indexOf('replay') >= 0) replayLanes.push(blLane);
+      else nonReplayLanes.push(blLane);
+    }
+    if (replayLanes.length && nonReplayLanes.length) {
+      blLanes = replayLanes;
+    }
     var lanesNow = !!(blLanes && blLanes.length);
     var nowFocusTs = Date.now();
     if (lanesNow) trailingFocusLastSeenTs = nowFocusTs;
@@ -546,16 +599,21 @@ window.__ENTRADE_AUTOMATION_SIM__ = {
       var holdLanes = (bracketLiveHold && bracketLiveHold.lanes) ? bracketLiveHold.lanes : [];
       if (holdLanes.length) blLanes = holdLanes;
     }
+    if (blLanes.length) {
+      var replayLanes2 = [];
+      var nonReplayLanes2 = [];
+      for (var blx2 = 0; blx2 < blLanes.length; blx2++) {
+        var blLane2 = blLanes[blx2] || {};
+        if (String(blLane2.lane || '').indexOf('replay') >= 0) replayLanes2.push(blLane2);
+        else nonReplayLanes2.push(blLane2);
+      }
+      if (replayLanes2.length && nonReplayLanes2.length) {
+        blLanes = replayLanes2;
+      }
+    }
     var trailingFocusMode = lanesNow || stickyFocus;
     if (trailingFocusMode && blLanes.length) {
       var primLane = blLanes[0] || {};
-      for (var plh = 0; plh < blLanes.length; plh++) {
-        var Lh = blLanes[plh] || {};
-        if (String(Lh.lane || '').indexOf('replay') < 0) {
-          primLane = Lh;
-          break;
-        }
-      }
       var opK = String((lastData && lastData.ticker) || '') + '|' + String(primLane.lane || '') + '|' + String(primLane.operation_id || '');
       if (trailHistLaneKey !== opK) {
         trailHistLaneKey = opK;
@@ -575,25 +633,35 @@ window.__ENTRADE_AUTOMATION_SIM__ = {
     } else if (!trailingFocusMode) {
       trailHistLaneKey = '';
     }
+    function trailingLevelInFocusScale(px) {
+      var v = Number(px);
+      if (!isFinite(v)) return false;
+      if (!trailingFocusMode) return true;
+      // Em foco trailing, evita que SL/TP muito distantes "quebrem" o zoom do candle.
+      var guard = Math.max(candlesSpan * 2.5, Math.abs(candlesMid) * 0.003);
+      var lo = candlesMin - guard;
+      var hi = candlesMax + guard;
+      return v >= lo && v <= hi;
+    }
     for (var bi0 = 0; bi0 < blLanes.length; bi0++) {
       var B0 = blLanes[bi0] || {};
       if (B0.tp_price != null) {
         var tpv0 = Number(B0.tp_price);
-        if (isFinite(tpv0)) {
+        if (trailingLevelInFocusScale(tpv0)) {
           min = Math.min(min, tpv0);
           max = Math.max(max, tpv0);
         }
       }
-      if (B0.sl_trigger != null) {
+      if (!HIDE_STOP_MARKERS && B0.sl_trigger != null) {
         var slv0 = Number(B0.sl_trigger);
-        if (isFinite(slv0)) {
+        if (trailingLevelInFocusScale(slv0)) {
           min = Math.min(min, slv0);
           max = Math.max(max, slv0);
         }
       }
       if (B0.entry_anchor != null) {
         var eav0 = Number(B0.entry_anchor);
-        if (isFinite(eav0)) {
+        if (trailingLevelInFocusScale(eav0)) {
           min = Math.min(min, eav0);
           max = Math.max(max, eav0);
         }
@@ -963,7 +1031,7 @@ window.__ENTRADE_AUTOMATION_SIM__ = {
           content.push(
             '<line x1="' + p.toFixed(2) + '" y1="' + yTarget.toFixed(2) + '" x2="' + (plotRight - 2).toFixed(2) + '" y2="' + yTarget.toFixed(2) + '" stroke="' + colTarget + '" stroke-opacity="0.85" stroke-width="1.3" stroke-dasharray="2 3"/>'
           );
-          if (yStop !== null) {
+          if (yStop !== null && !HIDE_STOP_MARKERS) {
             content.push(
               '<line x1="' + p.toFixed(2) + '" y1="' + yStop.toFixed(2) + '" x2="' + (plotRight - 2).toFixed(2) + '" y2="' + yStop.toFixed(2) + '" stroke="' + colStop + '" stroke-opacity="0.82" stroke-width="1.2" stroke-dasharray="5 4"/>'
             );
@@ -1261,7 +1329,7 @@ window.__ENTRADE_AUTOMATION_SIM__ = {
           '<text x="' + (p + 4).toFixed(2) + '" y="' + (Math.max(p + 10, yEnt - 5)).toFixed(2) + '" font-size="' + (focusTrailUi ? '11' : '9') + '" fill="#f1f5f9" font-weight="' + (focusTrailUi ? '600' : '400') + '" text-anchor="start">Entrada ' + esc(fmtPrice(anchor)) + '</text>'
         );
       }
-      if (btpL !== null && isFinite(btpL)) {
+      if (btpL !== null && isFinite(btpL) && trailingLevelInFocusScale(btpL)) {
         var yblTP = yFromPrice(btpL);
         if (focusTrailUi) {
           content.push(
@@ -1282,7 +1350,7 @@ window.__ENTRADE_AUTOMATION_SIM__ = {
           );
         }
       }
-      if (bslL !== null && isFinite(bslL)) {
+      if (!HIDE_STOP_MARKERS && bslL !== null && isFinite(bslL)) {
         var yblSL = yFromPrice(bslL);
         if (focusTrailUi) {
           content.push(
@@ -1342,7 +1410,10 @@ window.__ENTRADE_AUTOMATION_SIM__ = {
       var lh = 12;
       if (focusTrailUi) {
         var r0 = trailRows[0] || {};
-        var oneL = 'op#' + esc(r0.op) + ' · ' + esc(r0.side) + ' · últ.' + esc(r0.last) + ' · ΔTP ' + esc(r0.dtp) + ' · ΔSL ' + esc(r0.dsl);
+        var slTxt = HIDE_STOP_MARKERS
+          ? ('SL flutuante ' + esc(r0.sl) + ' (oculto no gráfico)')
+          : ('ΔSL ' + esc(r0.dsl));
+        var oneL = 'op#' + esc(r0.op) + ' · ' + esc(r0.side) + ' · últ.' + esc(r0.last) + ' · ΔTP ' + esc(r0.dtp) + ' · ' + slTxt;
         var boxWf = Math.min(420, Math.max(280, Math.round((plotRight - p) * 0.55)));
         var boxHf = 44;
         var bx0f = Math.max(p + 4, plotRight - boxWf - 8);
@@ -1508,6 +1579,7 @@ window.__ENTRADE_AUTOMATION_SIM__ = {
 
   function requestProgressiveTailIfNeeded() {
     if (!useProgressiveSessionLoad()) return;
+    if (isReplayPaused()) return;
     if (!progressiveMorePending || progressiveTailInflight) return;
     if (progressiveLoadSeq !== candlesReqSeq) return;
     if (!progressiveTailNeedFetch()) return;
@@ -1523,6 +1595,7 @@ window.__ENTRADE_AUTOMATION_SIM__ = {
       progressiveTailTimer = null;
       progressiveTailScheduled = false;
       if (!useProgressiveSessionLoad()) return;
+      if (isReplayPaused()) return;
       if (!progressiveMorePending || progressiveTailInflight) return;
       if (progressiveLoadSeq !== candlesReqSeq) return;
       if (!progressiveTailNeedFetch()) return;
@@ -1553,6 +1626,7 @@ window.__ENTRADE_AUTOMATION_SIM__ = {
         .then(function(data) {
           progressiveTailInflight = false;
           if (data === null) return;
+          if (isReplayPaused()) return;
           if (savedSeq !== progressiveLoadSeq || savedSeq !== candlesReqSeq) return;
           lastData = data || {};
           var pm = data.progressive_meta || {};
@@ -1681,7 +1755,7 @@ window.__ENTRADE_AUTOMATION_SIM__ = {
     meta.textContent = 'Ticker ' + ((lastData && lastData.ticker) || '') +
       ' | intervalo ' + (lastData && lastData.interval_sec ? lastData.interval_sec : '') + 's' +
       ' | tipo ' + chartType +
-      ' | de ' + first + ' ate ' + last + '.' + histNote;
+      ' | de ' + first + ' ate ' + last + '.' + histNote + replayEngineInfoText();
 
     if (scrollMeta) {
       scrollMeta.textContent = 'Mostrando ' + visible.length + ' candles (de ' + (windowStart + 1) + ' a ' + (windowStart + visible.length) + ').';
@@ -1846,6 +1920,11 @@ window.__ENTRADE_AUTOMATION_SIM__ = {
   }
 
   function load(force, fromPoll) {
+    if (fromPoll === true) {
+      try {
+        if (window.__ENTRADE_REPLAY_MODE__ && window.__ENTRADE_REPLAY_PAUSED__ === true) return;
+      } catch (eRpLoad) {}
+    }
     var t = (tickerInput.value || '').trim().toUpperCase();
     if (!t) {
       renderEmpty('Informe um ticker.');
