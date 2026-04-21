@@ -14,7 +14,8 @@ class ObservationContext:
     Contexto único para avaliar estratégias no Celery.
 
     Tudo deriva de ``QuoteSnapshot`` / ``BookSnapshot`` no banco: ``live_tail`` é a cauda
-    recente; ``session_replay`` é o mesmo dia (com ``replay_until`` opcional), como no gráfico.
+    recente; ``session_replay`` é o mesmo dia com snapshots ``captured_at <= replay_until``
+    (sem look-ahead para o cursor do replay), como no gráfico.
     """
 
     mode: ObservationMode

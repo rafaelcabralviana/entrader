@@ -70,7 +70,7 @@ def stage_market_entry_for_trailing(
             ok=False,
             reason=f'Bloqueado: já existe posição ativa em {sym} ({position_lane}).',
         )
-    qty = max(1, min(2, int(quantity)))
+    qty = max(1, int(quantity))
     uid = int(getattr(user, 'id', 0) or 0)
     if uid:
         env_u = normalize_environment(
@@ -176,7 +176,7 @@ def stage_replay_entry_for_trailing(
             ok=False,
             reason=f'Bloqueado: já existe posição ativa em {sym} ({position_lane}).',
         )
-    qty = max(1, min(2, int(quantity)))
+    qty = max(1, int(quantity))
     uid = int(getattr(user, 'id', 0) or 0)
     if uid:
         env_u = normalize_environment(

@@ -3,7 +3,7 @@ Alargamento global de SL/TP em brackets (leafaR, tendência ativa, etc.).
 
 O motor de trailing em ``universal_bracket_trailing`` só **aperta** o stop a favor;
 a «faixa» inicial vem das estratégias. Estes multiplicadores alongam distâncias em
-relação ao último preço (env ou Django settings, ver docstrings).
+relação ao último preço (env ou Django settings; SL predef. ×2,0).
 """
 
 from __future__ import annotations
@@ -36,10 +36,10 @@ def _cfg_float(
 
 
 def bracket_sl_distance_mult() -> float:
-    """Distância entrada→SL multiplicada por este factor (1.0 = sem mudança). Predef.: 5.0."""
+    """Distância entrada→SL multiplicada por este factor (1.0 = sem mudança). Predef.: 2.0."""
     return _cfg_float(
         'TRADER_BRACKET_SL_DISTANCE_MULT',
-        5.0,
+        2.0,
         lo=1.0,
         hi=8.0,
         settings_attr='TRADER_BRACKET_SL_DISTANCE_MULT',
@@ -85,11 +85,11 @@ def trailing_min_favorable_ticks() -> int:
 
     Compra: máximo acima da entrada; venda: mínimo abaixo da entrada.
     **0** desliga o filtro (comportamento antigo, mais agressivo).
-    Predef.: 50 (~R$ 0,50 em ativo tick 0,01).
+    Predef.: 16 (~R$ 0,16 em ativo tick 0,01).
     """
     return _cfg_int(
         'TRADER_TRAILING_MIN_FAVORABLE_TICKS',
-        50,
+        16,
         lo=0,
         hi=200,
         settings_attr='TRADER_TRAILING_MIN_FAVORABLE_TICKS',
@@ -102,11 +102,11 @@ def trailing_protective_floor_ticks() -> int:
 
     Compra (SL venda abaixo): não sobe o gatilho acima de ``entrada − ticks`` (mantém folga).
     Venda (SL compra acima): não baixa o gatilho abaixo de ``entrada + ticks``.
-    **0** desliga. Predef.: 28.
+    **0** desliga. Predef.: 10.
     """
     return _cfg_int(
         'TRADER_TRAILING_PROTECTION_FLOOR_TICKS',
-        28,
+        10,
         lo=0,
         hi=120,
         settings_attr='TRADER_TRAILING_PROTECTION_FLOOR_TICKS',
@@ -178,6 +178,68 @@ def trailing_tp_peak_follow_ticks() -> float:
     )
 
 
+def trailing_breakeven_arm_ticks() -> int:
+    """
+    Ticks a favor para obrigar o SL a ultrapassar a entrada (break-even+).
+
+    Predef.: 18. **0** desliga.
+    """
+    return _cfg_int(
+        'TRADER_TRAILING_BREAKEVEN_ARM_TICKS',
+        18,
+        lo=0,
+        hi=300,
+        settings_attr='TRADER_TRAILING_BREAKEVEN_ARM_TICKS',
+    )
+
+
+def trailing_breakeven_offset_ticks() -> int:
+    """
+    Offset (ticks) acima/abaixo da entrada quando o break-even é armado.
+
+    Compra: SL >= entrada + offset. Venda: SL <= entrada - offset.
+    Predef.: 3. **0** = exatamente na entrada.
+    """
+    return _cfg_int(
+        'TRADER_TRAILING_BREAKEVEN_OFFSET_TICKS',
+        3,
+        lo=0,
+        hi=80,
+        settings_attr='TRADER_TRAILING_BREAKEVEN_OFFSET_TICKS',
+    )
+
+
+def trailing_relax_pullback_ticks() -> int:
+    """
+    Pullback mínimo (em ticks) para permitir afrouxar SL de forma controlada.
+
+    Predef.: 14. **0** desliga afrouxamento por pullback.
+    """
+    return _cfg_int(
+        'TRADER_TRAILING_RELAX_PULLBACK_TICKS',
+        14,
+        lo=0,
+        hi=200,
+        settings_attr='TRADER_TRAILING_RELAX_PULLBACK_TICKS',
+    )
+
+
+def trailing_relax_max_ticks() -> int:
+    """
+    Máximo de afrouxamento por ajuste (em ticks) quando há pullback.
+
+    Limita o quanto o SL pode "abrir" para não soltar demais o risco.
+    Predef.: 5. **0** desliga afrouxamento.
+    """
+    return _cfg_int(
+        'TRADER_TRAILING_RELAX_MAX_TICKS',
+        5,
+        lo=0,
+        hi=80,
+        settings_attr='TRADER_TRAILING_RELAX_MAX_TICKS',
+    )
+
+
 def apply_bracket_distance_multipliers(
     side: str,
     last: float,
@@ -214,6 +276,10 @@ __all__ = [
     'trailing_lock_profit_floor_pct',
     'trailing_min_favorable_ticks',
     'trailing_protective_floor_ticks',
+    'trailing_breakeven_arm_ticks',
+    'trailing_breakeven_offset_ticks',
+    'trailing_relax_pullback_ticks',
+    'trailing_relax_max_ticks',
     'trailing_stop_tick_steps',
     'trailing_tp_peak_follow_ticks',
 ]

@@ -5,10 +5,12 @@ Sincroniza a simulação de mercado da sessão HTTP para ``AutomationMarketSimPr
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime, time as dtime
+
+from zoneinfo import ZoneInfo
 
 from trader.automacoes.simulation import get_automation_market_simulation
-from trader.environment import ENV_SIMULATOR, get_session_environment, normalize_environment
+from trader.environment import ENV_REAL, ENV_REPLAY, ENV_SIMULATOR, get_session_environment, normalize_environment
 from trader.models import AutomationMarketSimPreference
 
 
@@ -41,9 +43,23 @@ def clear_automation_sim_preference_for_user(user, trading_environment: str) -> 
     )
 
 
+def _session_open_brt(dt: date) -> datetime:
+    """Ancla inicial do pregão (B3 ações) para alinhar o cursor ao «início do dia» no Replay."""
+    return datetime.combine(dt, dtime(10, 0, 0), tzinfo=ZoneInfo('America/Sao_Paulo'))
+
+
 def _sync_for_user_session(user, env: str, request) -> None:
     env = normalize_environment(env)
-    if env != ENV_SIMULATOR:
+    if env == ENV_REAL:
+        for e in (ENV_SIMULATOR, ENV_REPLAY):
+            AutomationMarketSimPreference.objects.filter(user=user, trading_environment=e).update(
+                enabled=False,
+                session_date=None,
+                sim_ticker='',
+                replay_until=None,
+            )
+        return
+    if env not in (ENV_SIMULATOR, ENV_REPLAY):
         AutomationMarketSimPreference.objects.filter(user=user, trading_environment=env).update(
             enabled=False,
             session_date=None,
@@ -55,14 +71,19 @@ def _sync_for_user_session(user, env: str, request) -> None:
     if sim.get('effective'):
         sd: date | None = sim.get('session_date')
         sym = (sim.get('sim_ticker') or '').strip().upper()
+        defaults: dict = {
+            'enabled': True,
+            'session_date': sd,
+            'sim_ticker': sym,
+        }
+        if env == ENV_REPLAY and sd is not None:
+            defaults['replay_until'] = _session_open_brt(sd)
+        elif env == ENV_SIMULATOR:
+            defaults['replay_until'] = None
         AutomationMarketSimPreference.objects.update_or_create(
             user=user,
             trading_environment=env,
-            defaults={
-                'enabled': True,
-                'session_date': sd,
-                'sim_ticker': sym,
-            },
+            defaults=defaults,
         )
     else:
         AutomationMarketSimPreference.objects.filter(user=user, trading_environment=env).update(

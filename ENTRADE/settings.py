@@ -398,6 +398,10 @@ TRADER_TICKER_NOT_ALLOWED_TTL_SEC = max(
     int(os.environ.get('TRADER_TICKER_NOT_ALLOWED_TTL_SEC', '600') or '600'),
 )
 
+# Gravação de QuoteSnapshot/BookSnapshot (Celery watch e ``save_*``): segunda a sexta,
+# 09:00–19:00 em America/Sao_Paulo (extremos inclusive). ``False`` desliga o filtro (testes / coleta manual).
+TRADER_QUOTE_SAVE_BRT_WINDOW_ENABLED = _env_bool('TRADER_QUOTE_SAVE_BRT_WINDOW_ENABLED', True)
+
 # Quando a API indica pregão encerrado (status EndOfDay), o Celery entra em standby e não
 # dispara quote/book até ``TRADER_WATCH_CLOSED_INTERVAL_SEC`` (próxima sonda).
 TRADER_WATCH_STANDBY_ENABLED = _env_bool('TRADER_WATCH_STANDBY_ENABLED', True)

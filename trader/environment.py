@@ -5,7 +5,8 @@ from contextvars import ContextVar
 
 ENV_SIMULATOR = 'simulator'
 ENV_REAL = 'real'
-VALID_ENVIRONMENTS: frozenset[str] = frozenset({ENV_SIMULATOR, ENV_REAL})
+ENV_REPLAY = 'replay'
+VALID_ENVIRONMENTS: frozenset[str] = frozenset({ENV_SIMULATOR, ENV_REAL, ENV_REPLAY})
 
 SESSION_KEY = 'trader_environment'
 _current_env: ContextVar[str] = ContextVar('trader_environment', default=ENV_SIMULATOR)
@@ -53,10 +54,30 @@ def set_session_environment(request, value: str | None) -> str:
     return env
 
 
+def strategy_toggle_storage_environment(env: str | None) -> str:
+    """
+    Toggles de estratégia (AutomationStrategyToggle) partilhados entre Replay e Simulador:
+    a gravação/leitura efectiva usa sempre o armazenamento do simulador quando o ambiente
+    lógico é Replay.
+    """
+    e = normalize_environment(env)
+    if e == ENV_REPLAY:
+        return ENV_SIMULATOR
+    return e
+
+
 def environment_label(env: str) -> str:
-    return 'REAL' if normalize_environment(env) == ENV_REAL else 'SIMULADOR'
+    e = normalize_environment(env)
+    if e == ENV_REAL:
+        return 'REAL'
+    if e == ENV_REPLAY:
+        return 'REPLAY'
+    return 'SIMULADOR'
 
 
 def order_api_mode_label() -> str:
-    """Rótulo REAL ou SIMULADOR alinhado a :func:`get_current_environment` (envio à API)."""
-    return environment_label(get_current_environment())
+    """Rótulo para envio à API: REAL vs simulador (Replay usa API de teste como o simulador)."""
+    cur = normalize_environment(get_current_environment())
+    if cur == ENV_REAL:
+        return 'REAL'
+    return 'SIMULADOR'

@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from django.utils import timezone
 
-from trader.environment import ENV_SIMULATOR, normalize_environment
+from trader.environment import ENV_REPLAY, ENV_SIMULATOR, normalize_environment
 from trader.models import AutomationExecutionProfile
 
 
@@ -83,7 +83,7 @@ def create_sim_profile(user, trading_environment: str, *, name: str, sim_ticker:
     env = normalize_environment(trading_environment)
     mode = (
         AutomationExecutionProfile.Mode.SIMULATION
-        if env == ENV_SIMULATOR
+        if env in (ENV_SIMULATOR, ENV_REPLAY)
         else AutomationExecutionProfile.Mode.REAL_TIME
     )
     nm = (name or '').strip()[:64] or 'Simulação'

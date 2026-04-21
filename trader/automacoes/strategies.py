@@ -116,7 +116,8 @@ AUTOMATION_STRATEGIES: list[StrategyDef] = [
             'Só lê ``QuoteSnapshot`` (o que o Celery grava): ao vivo e simulação = **todo o dia civil em BRT** '
             'até ao instante actual (no replay, ``replay_until`` alinhado ao scrubber). A cada ciclo do watch reavalia com critérios '
             'aproximados (ajuste TRADER_LEAFAR_VP_CORRIDOR_RATIO, TRADER_LEAFAR_TREND_MIN_FRAC, '
-            'TRADER_LEAFAR_TREND_WINDOW, TRADER_LEAFAR_MIN_PRICE_SEP_FRAC, TRADER_LEAFAR_MIN_CANDLES, '
+            'TRADER_LEAFAR_TREND_WINDOW, TRADER_LEAFAR_MIN_PRICE_SEP_FRAC, TRADER_LEAFAR_SESSION_LOCAL_SEP_FRAC, '
+            'TRADER_LEAFAR_MIN_CANDLES, '
             'TRADER_LEAFAR_VP_BINS). Ordens: TRADER_LEAFAR_SEND_ORDERS. No **replay** do simulador o bracket é '
             'fictício (preço da vela, ledger ``replay_shadow``); ao vivo usa a API.'
         ),
@@ -149,10 +150,10 @@ AUTOMATION_STRATEGIES: list[StrategyDef] = [
                 'name': 'TRADER_BRACKET_SL / TP / trailing (STOP, MFE, lock lucro, TP)',
                 'detail': (
                     'Globais para **todas** as estratégias com bracket: após o cálculo do sinal, alarga SL e TP '
-                    'em relação ao último (predef.: SL ×5,0 e TP ×4,0; limites 1–8). '
+                    'em relação ao último (predef.: SL ×2,0 e TP ×4,0; limites 1–8). '
                     '``TRADER_TRAILING_STOP_TICKS``: passo (predef. 12). '
-                    '``TRADER_TRAILING_MIN_FAVORABLE_TICKS``: ticks a favor antes de apertar (predef. 50; 0=desliga). '
-                    '``TRADER_TRAILING_PROTECTION_FLOOR_TICKS``: folga mínima entrada↔gatilho (predef. 28; 0=desliga). '
+                    '``TRADER_TRAILING_MIN_FAVORABLE_TICKS``: ticks a favor antes de apertar (predef. 16; 0=desliga). '
+                    '``TRADER_TRAILING_PROTECTION_FLOOR_TICKS``: folga mínima entrada↔gatilho (predef. 10; 0=desliga). '
                     '``TRADER_TRAILING_LOCK_PROFIT_ARM_PCT`` / ``TRADER_TRAILING_LOCK_PROFIT_FLOOR_PCT``: após lucro '
                     'máximo a favor ≥ arm (predef. 3 %), garante lucro mínimo floor (predef. 1 %) no SL. '
                     '``TRADER_TRAILING_TP_FOLLOW_PEAK_TICKS``: TP limite acompanha pico/vale (predef. 6; 0=desliga). '
@@ -173,7 +174,14 @@ AUTOMATION_STRATEGIES: list[StrategyDef] = [
             },
             {
                 'name': 'TRADER_LEAFAR_MIN_CANDLES',
-                'detail': 'Mínimo de candles na amostra antes de avaliar (≥15).',
+                'detail': 'Mínimo de candles na amostra antes de avaliar (≥20; predefinição 42).',
+            },
+            {
+                'name': 'TRADER_LEAFAR_MIN_SESSION_MINUTES',
+                'detail': (
+                    'Minutos mínimos decorridos desde a 1ª barra da sessão para permitir sinal '
+                    '(0 desliga; predefinição 18). Evita entrada cedo demais no abrir do pregão.'
+                ),
             },
             {
                 'name': 'TRADER_LEAFAR_TREND_WINDOW',
@@ -193,7 +201,46 @@ AUTOMATION_STRATEGIES: list[StrategyDef] = [
             },
             {
                 'name': 'TRADER_LEAFAR_MIN_PRICE_SEP_FRAC',
-                'detail': 'Separação mínima preço–POC como fração do intervalo de preços (0–0,08).',
+                'detail': (
+                    'Fração base da separação preço–POC sobre a **amplitude do dia** (máx.−mín. nas velas); '
+                    'combinada com TRADER_LEAFAR_SESSION_LOCAL_SEP_FRAC (borda mais próxima).'
+                ),
+            },
+            {
+                'name': 'TRADER_LEAFAR_SESSION_LOCAL_SEP_FRAC',
+                'detail': (
+                    'Fração mínima |preço−POC| sobre a distância do último à **borda da sessão mais próxima** '
+                    '(com piso em ticks). Junto com MIN_PRICE_SEP_FRAC define o mínimo absoluto aceite — '
+                    '«perto/longe» da formação em relação ao dia. Predef. 0,22 (0,05–0,55).'
+                ),
+            },
+            {
+                'name': 'TRADER_LEAFAR_POC_STABILITY_BARS',
+                'detail': (
+                    'Confirma estabilidade do POC (#1) nas últimas barras antes de sinalizar '
+                    '(1 desliga; padrão 2, cautela moderada).'
+                ),
+            },
+            {
+                'name': 'TRADER_LEAFAR_POC_DOMINANCE_RATIO',
+                'detail': (
+                    'Relação mínima vol(#1)/vol(#2) do VP para aceitar sinal '
+                    '(padrão 1,08; maior = mais seletivo).'
+                ),
+            },
+            {
+                'name': 'TRADER_LEAFAR_PERSISTENCE_BARS',
+                'detail': (
+                    'Barras seguidas com preço do mesmo lado do POC antes de entrar '
+                    '(1 desliga; padrão 2).'
+                ),
+            },
+            {
+                'name': 'TRADER_LEAFAR_MIN_RECENT_RANGE_TICKS',
+                'detail': (
+                    'Range mínimo recente (em ticks) para evitar entradas em lateral estreita '
+                    '(0 desliga; padrão 8).'
+                ),
             },
         ],
     },
@@ -336,9 +383,9 @@ AUTOMATION_STRATEGIES: list[StrategyDef] = [
             {
                 'name': 'TRADER_BRACKET_SL / TP / trailing (ticks)',
                 'detail': (
-                    'Após TP_FRAC/SL_FRAC, alarga distâncias ao último (predef.: SL ×5,0, TP ×4,0). '
-                    'Trailing: ``TRADER_TRAILING_STOP_TICKS``, ``TRADER_TRAILING_MIN_FAVORABLE_TICKS`` (50), '
-                    '``TRADER_TRAILING_PROTECTION_FLOOR_TICKS`` (28). Env ou ``settings``.'
+                    'Após TP_FRAC/SL_FRAC, alarga distâncias ao último (predef.: SL ×2,0, TP ×4,0). '
+                    'Trailing: ``TRADER_TRAILING_STOP_TICKS``, ``TRADER_TRAILING_MIN_FAVORABLE_TICKS`` (16), '
+                    '``TRADER_TRAILING_PROTECTION_FLOOR_TICKS`` (10). Env ou ``settings``.'
                 ),
             },
         ],

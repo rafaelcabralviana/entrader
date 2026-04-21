@@ -31,6 +31,11 @@ urlpatterns = [
         name='automation_clear_thoughts',
     ),
     path(
+        'automacoes/limpar-ledger-replay-ficticio/',
+        views.automation_replay_shadow_ledger_clear,
+        name='automation_replay_shadow_ledger_clear',
+    ),
+    path(
         'automacoes/perfis/selecionar/',
         views.automation_profile_select,
         name='automation_profile_select',
@@ -54,6 +59,11 @@ urlpatterns = [
         'automacoes/replay-dia.json',
         views.automation_replay_day_json,
         name='automation_replay_day_json',
+    ),
+    path(
+        'automacoes/replay-stream/',
+        views.automation_replay_stream_start,
+        name='automation_replay_stream_start',
     ),
     path('ambiente/selecionar/', views.set_trading_environment, name='set_trading_environment'),
     path('mercado/snapshot.json', views.market_snapshot_json, name='market_snapshot_json'),

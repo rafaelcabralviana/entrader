@@ -14,7 +14,7 @@ from trader.automacoes.market_entry_trailing import (
 )
 from trader.automacoes.thoughts import record_automation_thought
 from trader.custody_simulator import record_bracket_execution_marker
-from trader.environment import ENV_SIMULATOR, get_current_environment, normalize_environment
+from trader.environment import ENV_REPLAY, ENV_SIMULATOR, get_current_environment, normalize_environment
 from trader.automacoes.execution_guard import release_market_entry_lock, try_acquire_market_entry_lock
 from trader.models import AutomationThought, Position
 from trader.order_enums import (ORDER_SIDE_BUY, ORDER_SIDE_SELL)
@@ -246,7 +246,7 @@ def execute_leafar_bracket_replay_shadow(
             except Exception:
                 logger.exception('leafar replay shadow thought')
 
-        if get_current_environment() == ENV_SIMULATOR:
+        if get_current_environment() in (ENV_SIMULATOR, ENV_REPLAY):
             try:
                 record_bracket_execution_marker(
                     ticker=sym,

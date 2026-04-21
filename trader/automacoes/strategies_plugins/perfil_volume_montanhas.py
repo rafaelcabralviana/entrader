@@ -5,12 +5,17 @@ em cada faixa de preço), alinhado ao mesmo VP OHLC que o leafaR (bins configur�
 
 from __future__ import annotations
 
+from datetime import date
 from typing import Any, Optional
 
 from django.conf import settings
 from django.core.cache import cache
 
-from trader.automacoes.leafar_candles import load_session_day_candles, parse_replay_until_iso
+from trader.automacoes.leafar_candles import (
+    load_session_day_candles,
+    parse_replay_until_iso,
+    trim_candles_to_replay_until,
+)
 from trader.automacoes.leafar_vp import compute_volume_profile, volume_profile_mountains
 from trader.automacoes.strategy_registry import register_evaluator
 from trader.trading_system.contracts.context import ObservationContext
@@ -66,27 +71,30 @@ def evaluate(ctx: ObservationContext, user: Any) -> Optional[str]:
         is_full_day = bool((ctx.extra or {}).get('candles_full_day')) if isinstance(ctx.extra, dict) else False
     except Exception:
         is_full_day = False
-    if not is_full_day:
-        from datetime import date
-        day_iso = str(ctx.session_date_iso or (ctx.extra or {}).get('session_day_iso') or '').strip()
+
+    day_iso = str(ctx.session_date_iso or (ctx.extra or {}).get('session_day_iso') or '').strip()
+    try:
+        session_day = date.fromisoformat(day_iso[:10]) if day_iso else None
+    except Exception:
+        session_day = None
+    replay_until = parse_replay_until_iso(getattr(ctx, 'replay_until_iso', None))
+    # Replay com cursor: recarregar sempre (``candles_full_day`` sozinho não garante anti look-ahead).
+    needs_reload = (not is_full_day) or (replay_until is not None)
+    if needs_reload and session_day is not None:
         try:
-            session_day = date.fromisoformat(day_iso[:10]) if day_iso else None
-        except Exception:
-            session_day = None
-        if session_day is not None:
-            try:
-                iv = max(1, min(int(getattr(settings, 'TRADER_LEAFAR_INTERVAL_SEC', 10)), 300))
-            except (TypeError, ValueError):
-                iv = 10
-            replay_until = parse_replay_until_iso(getattr(ctx, 'replay_until_iso', None))
-            full = load_session_day_candles(
-                (ctx.ticker or '').strip().upper(),
-                session_day,
-                interval_sec=iv,
-                replay_until=replay_until,
-            )
-            if isinstance(full, list) and len(full) >= _MIN_BARS:
-                candles = full
+            iv = max(1, min(int(getattr(settings, 'TRADER_LEAFAR_INTERVAL_SEC', 10)), 300))
+        except (TypeError, ValueError):
+            iv = 10
+        full = load_session_day_candles(
+            (ctx.ticker or '').strip().upper(),
+            session_day,
+            interval_sec=iv,
+            replay_until=replay_until,
+        )
+        if replay_until is not None and isinstance(full, list):
+            full = trim_candles_to_replay_until(full, replay_until)
+        if isinstance(full, list) and len(full) >= _MIN_BARS:
+            candles = full
     bins = _vp_bins()
     vp = compute_volume_profile(candles, num_bins=bins)
     if vp is None:

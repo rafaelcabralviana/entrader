@@ -168,7 +168,7 @@
       border-radius: 10px;
       background: var(--bg);
       padding: 0.5rem 0.55rem;
-      margin: 0 0 0.55rem;
+      margin: 0;
     }
     .automation-live-focus .focus-title {
       margin: 0 0 0.18rem;
@@ -189,12 +189,6 @@
       font-size: 0.76rem;
       font-weight: 700;
       line-height: 1.25;
-    }
-    .automation-live-focus .focus-hint {
-      margin: 0.18rem 0 0;
-      font-size: 0.68rem;
-      color: var(--sidebar-muted);
-      line-height: 1.3;
     }
     .automation-live-focus select {
       min-width: 6.8rem;
@@ -263,12 +257,6 @@
       color: #10b981;
       border-color: rgba(16, 185, 129, 0.45);
     }
-    .automation-runtime-hint {
-      margin: 0.32rem 0 0;
-      font-size: 0.68rem;
-      color: var(--sidebar-muted);
-      line-height: 1.3;
-    }
   </style>
   <p class="sidebar-boleta-title">Estrategias</p>
   <span class="automation-env-pill" style="display:inline-flex;margin-bottom:0.5rem;font-size:0.68rem;" title="Ambiente dos interruptores">
@@ -291,16 +279,8 @@
         Máx. operações abertas
       </label>
       <input type="number" name="max_open_operations" min="1" max="10" step="1" value="{{ automation_max_open_operations|default:1 }}" style="width:4.8rem;padding:0.2rem 0.3rem;border-radius:8px;border:1px solid var(--border);background:var(--bg);color:var(--fg);font-size:0.72rem;">
-      <button type="submit" name="runtime_action" value="save_limit" class="automation-runtime-btn" style="width:auto;padding:0.24rem 0.5rem;font-size:0.7rem;font-weight:700;">
-        Salvar limite
-      </button>
     </div>
-    <p class="automation-runtime-hint">Controle global por ambiente (Simulador/Real). Salvo automaticamente.</p>
-  </form>
-  <form id="automations-strategy-form" method="post" action="{% url 'trader:automations_dashboard' %}" class="sidebar-strategy-form">
-    {% csrf_token %}
-    <input type="hidden" name="form_name" value="automation_strategies">
-    <div class="automation-live-focus">
+    <div class="automation-live-focus" style="margin-top:0.45rem;">
       <p class="focus-title">Ticker do bot</p>
       <div class="focus-row">
         <span class="focus-label">Execução em tempo real</span>
@@ -311,8 +291,14 @@
           {% endfor %}
         </select>
       </div>
-      <p class="focus-hint">Escolha um ativo para o robô operar só nele. Em “Todos”, usa todos os monitorados.</p>
     </div>
+    <button type="submit" name="runtime_action" value="save_all" class="submit" style="width:100%;margin-top:0.5rem;padding:0.4rem 0.5rem;font-size:0.78rem;font-weight:700;">
+      Salvar tudo
+    </button>
+  </form>
+  <form id="automations-strategy-form" method="post" action="{% url 'trader:automations_dashboard' %}" class="sidebar-strategy-form">
+    {% csrf_token %}
+    <input type="hidden" name="form_name" value="automation_strategies">
     <p style="font-size:0.72rem;font-weight:700;margin:0.45rem 0 0.2rem;color:var(--sidebar-muted);text-transform:uppercase;letter-spacing:0.04em;">
       Execução global
     </p>
@@ -341,13 +327,13 @@
           <button type="button" class="strat-modal-close" data-strat-modal-close="trailing-modal" aria-label="Fechar">×</button>
         </div>
         <span class="hint" style="display:block;margin-top:0.22rem;font-weight:500;line-height:1.35;">
-          Largura TP/SL inicial: <code>TRADER_BRACKET_SL_DISTANCE_MULT</code> (predef. 5) e
+          Largura TP/SL inicial: <code>TRADER_BRACKET_SL_DISTANCE_MULT</code> (predef. 2) e
           <code>TRADER_BRACKET_TP_DISTANCE_MULT</code> (predef. 4).
         </span>
         <span class="hint" style="display:block;margin-top:0.22rem;font-weight:500;line-height:1.35;">
           Trailing: <code>TRADER_TRAILING_STOP_TICKS</code> (12), MFE
-          <code>TRADER_TRAILING_MIN_FAVORABLE_TICKS</code> (50), piso
-          <code>TRADER_TRAILING_PROTECTION_FLOOR_TICKS</code> (28).
+          <code>TRADER_TRAILING_MIN_FAVORABLE_TICKS</code> (16), piso
+          <code>TRADER_TRAILING_PROTECTION_FLOOR_TICKS</code> (10).
         </span>
         <span class="hint" style="display:block;margin-top:0.22rem;font-weight:500;line-height:1.35;">
           Lock lucro: <code>TRADER_TRAILING_LOCK_PROFIT_ARM_PCT</code> /

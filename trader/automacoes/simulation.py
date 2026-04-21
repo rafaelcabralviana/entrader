@@ -1,18 +1,23 @@
 """
-Simulação de mercado por dia (somente ambiente simulador): usa snapshots salvos como se fossem «ao vivo».
+Simulação de mercado por dia (simulador) e sessão de Replay (snapshots locais por dia).
 
 O estado fica na sessão Django; em ambiente real é ignorado e limpo ao trocar para REAL.
+Simulador e Replay usam chaves de sessão distintas para não misturar o dia activo.
 """
 
 from __future__ import annotations
 
 from datetime import date
 
-from trader.environment import ENV_SIMULATOR, get_session_environment
+from trader.environment import ENV_REAL, ENV_REPLAY, ENV_SIMULATOR, get_session_environment
 
 SESSION_KEY_SIM_ENABLED = 'trader_automation_mkt_sim_enabled'
 SESSION_KEY_SIM_DATE = 'trader_automation_mkt_sim_date'
 SESSION_KEY_SIM_TICKER = 'trader_automation_mkt_sim_ticker'
+
+SESSION_KEY_REPLAY_ENABLED = 'trader_automation_mkt_replay_enabled'
+SESSION_KEY_REPLAY_DATE = 'trader_automation_mkt_replay_date'
+SESSION_KEY_REPLAY_TICKER = 'trader_automation_mkt_replay_ticker'
 
 
 def _parse_iso_date(raw: str | None) -> date | None:
@@ -26,18 +31,35 @@ def _parse_iso_date(raw: str | None) -> date | None:
         return None
 
 
+def _session_keys_for_env(env: str) -> tuple[str, str, str]:
+    if env == ENV_REPLAY:
+        return (SESSION_KEY_REPLAY_ENABLED, SESSION_KEY_REPLAY_DATE, SESSION_KEY_REPLAY_TICKER)
+    return (SESSION_KEY_SIM_ENABLED, SESSION_KEY_SIM_DATE, SESSION_KEY_SIM_TICKER)
+
+
 def clear_automation_market_simulation(request) -> None:
-    """Remove flags de simulação da sessão."""
-    request.session.pop(SESSION_KEY_SIM_ENABLED, None)
-    request.session.pop(SESSION_KEY_SIM_DATE, None)
-    request.session.pop(SESSION_KEY_SIM_TICKER, None)
+    """Remove apenas as flags de simulação do simulador (não mexe na sessão de Replay)."""
+    for k in (SESSION_KEY_SIM_ENABLED, SESSION_KEY_SIM_DATE, SESSION_KEY_SIM_TICKER):
+        request.session.pop(k, None)
+
+
+def clear_replay_market_session(request) -> None:
+    """Remove flags da sessão de dia usada no ambiente Replay."""
+    for k in (SESSION_KEY_REPLAY_ENABLED, SESSION_KEY_REPLAY_DATE, SESSION_KEY_REPLAY_TICKER):
+        request.session.pop(k, None)
+
+
+def clear_all_market_day_sessions(request) -> None:
+    """Usado ao mudar para REAL: limpa simulador e replay na sessão."""
+    clear_automation_market_simulation(request)
+    clear_replay_market_session(request)
 
 
 def get_automation_market_simulation(request) -> dict:
     """
-    Retorna estado da simulação para templates e APIs.
+    Retorna estado da simulação / sessão de dia para templates e APIs.
 
-    ``effective`` é True só em simulador, com opção ligada e data válida.
+    ``effective`` é True no simulador ou em Replay, com opção ligada e data válida.
     """
     env = get_session_environment(request)
     out: dict = {
@@ -49,16 +71,19 @@ def get_automation_market_simulation(request) -> dict:
         'effective': False,
         'label_br': '',
     }
-    if env != ENV_SIMULATOR:
+    if env == ENV_REAL:
         return out
-    out['enabled_flag'] = bool(request.session.get(SESSION_KEY_SIM_ENABLED))
-    raw = (request.session.get(SESSION_KEY_SIM_DATE) or '').strip()
+    if env not in (ENV_SIMULATOR, ENV_REPLAY):
+        return out
+    k_en, k_dt, k_sym = _session_keys_for_env(env)
+    out['enabled_flag'] = bool(request.session.get(k_en))
+    raw = (request.session.get(k_dt) or '').strip()
     sd = _parse_iso_date(raw)
     if sd:
         out['session_date'] = sd
         out['session_date_iso'] = sd.isoformat()
         out['label_br'] = sd.strftime('%d/%m/%Y')
-    raw_sym = (request.session.get(SESSION_KEY_SIM_TICKER) or '').strip().upper()
+    raw_sym = (request.session.get(k_sym) or '').strip().upper()
     if raw_sym:
         out['sim_ticker'] = raw_sym
     out['effective'] = bool(
@@ -77,11 +102,17 @@ def set_automation_market_simulation(
     sim_ticker: str | None = None,
 ) -> dict:
     """
-    Grava simulação na sessão (apenas faz sentido em simulador; chamar só após checar ambiente).
+    Grava simulação na sessão (simulador ou Replay, conforme o ambiente activo na sessão).
     Data ou ticker inválidos não alteram o estado anterior.
     """
+    env = get_session_environment(request)
+    if env not in (ENV_SIMULATOR, ENV_REPLAY):
+        return get_automation_market_simulation(request)
+    k_en, k_dt, k_sym = _session_keys_for_env(env)
     if not enabled:
-        clear_automation_market_simulation(request)
+        request.session.pop(k_en, None)
+        request.session.pop(k_dt, None)
+        request.session.pop(k_sym, None)
         request.session.modified = True
         return get_automation_market_simulation(request)
     raw = (session_date_iso or '').strip()
@@ -89,8 +120,8 @@ def set_automation_market_simulation(
     sym = (sim_ticker or '').strip().upper()
     if sd is None or not sym:
         return get_automation_market_simulation(request)
-    request.session[SESSION_KEY_SIM_ENABLED] = True
-    request.session[SESSION_KEY_SIM_DATE] = sd.isoformat()
-    request.session[SESSION_KEY_SIM_TICKER] = sym
+    request.session[k_en] = True
+    request.session[k_dt] = sd.isoformat()
+    request.session[k_sym] = sym
     request.session.modified = True
     return get_automation_market_simulation(request)

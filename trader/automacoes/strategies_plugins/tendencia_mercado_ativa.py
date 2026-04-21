@@ -34,6 +34,10 @@ from trader.automacoes.execution_guard import (
     try_consume_order_slot_for_round,
 )
 from trader.automacoes.runtime import runtime_max_open_operations, runtime_max_position_units
+from trader.automacoes.session_range_bracket import (
+    adjust_tp_sl_to_session_extremes,
+    session_high_low_from_candles,
+)
 from trader.automacoes.bracket_volume_levels import protective_lvn_stop_mid
 from trader.automacoes.bracket_width import apply_bracket_distance_multipliers
 from trader.automacoes.leafar_vp import compute_volume_profile
@@ -48,7 +52,7 @@ from trader.automacoes.trend_core import (
     range_of_window,
     trend_vote_probability_last_k,
 )
-from trader.environment import ENV_REAL, ENV_SIMULATOR, order_api_mode_label
+from trader.environment import ENV_REAL, ENV_REPLAY, ENV_SIMULATOR, order_api_mode_label
 from trader.models import AutomationThought, AutomationTriggerMarker
 from trader.trading_system.contracts.context import ObservationContext
 
@@ -329,8 +333,17 @@ def _require_profile_started_for_orders() -> bool:
     return bool(getattr(settings, 'TRADER_TENDENCIA_ATIVA_REQUIRE_PROFILE_STARTED', False))
 
 
-def _quantity() -> int:
-    return 2
+def _quantity(user, env: str) -> int:
+    """
+    Quantidade por entrada; limitada pelo máx. operações abertas (robô) e por ``TRADER_TENDENCIA_ATIVA_QUANTITY``.
+    """
+    try:
+        q = int(getattr(settings, 'TRADER_TENDENCIA_ATIVA_QUANTITY', 1))
+    except (TypeError, ValueError):
+        q = 1
+    q = max(1, q)
+    mo = runtime_max_open_operations(user, env)
+    return max(1, min(q, mo))
 
 
 def _tp_sl_from_range(side: str, last: float, rng: float) -> tuple[float, float]:
@@ -385,7 +398,7 @@ def run_tendencia_ativa_for_context(ctx: ObservationContext, user, env: str) -> 
     for_live = ctx.data_source == 'live_tail'
     data_label = ctx.data_source or ctx.mode
     env_n = str(env).strip().lower()
-    replay_sim = env_n == ENV_SIMULATOR and ctx.data_source == 'session_replay'
+    replay_sim = env_n == ENV_REPLAY and ctx.data_source == 'session_replay'
     bracket_lane = BRACKET_LANE_REPLAY_SHADOW if replay_sim else BRACKET_LANE_STANDARD
 
     try:
@@ -393,7 +406,7 @@ def run_tendencia_ativa_for_context(ctx: ObservationContext, user, env: str) -> 
     except (TypeError, ValueError, KeyError, IndexError):
         return
 
-    run_in_simulator = env_n == ENV_SIMULATOR
+    run_in_simulator = env_n in (ENV_SIMULATOR, ENV_REPLAY)
     strategy_on = is_strategy_enabled(
         user,
         'tendencia_mercado_ativa',
@@ -537,6 +550,12 @@ def run_tendencia_ativa_for_context(ctx: ObservationContext, user, env: str) -> 
                 sl = max(float(sl), float(lvn))
             else:
                 sl = min(float(sl), float(lvn))
+    bounds = session_high_low_from_candles(candles)
+    if bounds is not None:
+        d_hi, d_lo = bounds
+        tp, sl = adjust_tp_sl_to_session_extremes(
+            str(side), last, float(tp), float(sl), d_hi, d_lo, tick
+        )
     sl_trig, sl_order_px = _sl_stop_limit_order_prices(side, last, sl)
     exec_note = ''
     th_show = f'{float(sig_th):.3f}' if sig_th is not None else f'padrão={SCORE_THRESHOLD:.2f}'
@@ -714,7 +733,7 @@ def run_tendencia_ativa_for_context(ctx: ObservationContext, user, env: str) -> 
                 last=last,
                 take_profit=tp,
                 stop_loss=sl,
-                quantity=_quantity(),
+                quantity=_quantity(user, env),
                 log_user=user,
                 log_environment=env,
                 log_execution_profile=profile,
@@ -729,7 +748,7 @@ def run_tendencia_ativa_for_context(ctx: ObservationContext, user, env: str) -> 
                 last=last,
                 take_profit=tp,
                 stop_loss=sl,
-                quantity=_quantity(),
+                quantity=_quantity(user, env),
                 log_user=user,
                 log_environment=env,
                 log_execution_profile=profile,

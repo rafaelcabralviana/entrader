@@ -31,6 +31,7 @@ from django.core.cache import cache
 
 from trader.environment import (
     ENV_REAL,
+    ENV_REPLAY,
     ENV_SIMULATOR,
     environment_label,
     get_current_environment,
@@ -38,6 +39,7 @@ from trader.environment import (
     normalize_environment,
     set_current_environment,
     set_session_environment,
+    strategy_toggle_storage_environment,
 )
 from trader.market_defaults import (
     default_primary_ticker,
@@ -61,7 +63,7 @@ from trader.automacoes.profiles import (
 from trader.automacoes.runtime import runtime_enabled, runtime_max_open_operations, set_runtime_enabled
 from trader.automacoes.strategies import AUTOMATION_STRATEGIES, strategy_display_dict
 from trader.automacoes.simulation import (
-    clear_automation_market_simulation,
+    clear_all_market_day_sessions,
     get_automation_market_simulation,
     set_automation_market_simulation,
 )
@@ -114,6 +116,7 @@ from trader.services.orders import (
 )
 from trader.order_enums import ORDER_MODULE_DAY_TRADE, ORDER_SIDE_BUY, ORDER_SIDE_SELL, ORDER_TIF_DAY
 from trader.models import (
+    AutomationMarketSimPreference,
     AutomationStrategyToggle,
     AutomationTriggerMarker,
     AutomationThought,
@@ -346,12 +349,13 @@ def set_trading_environment(request):
     except Exception:
         logger.exception('invalidate_intraday_orders_cache após troca de ambiente')
     if env == ENV_REAL:
-        clear_automation_market_simulation(request)
+        clear_all_market_day_sessions(request)
         try:
             clear_automation_sim_preference_for_user(request.user, ENV_SIMULATOR)
+            clear_automation_sim_preference_for_user(request.user, ENV_REPLAY)
         except Exception:
             logger.exception('clear_automation_sim_preference_for_user após REAL')
-    label = 'REAL' if env == 'real' else 'SIMULADOR'
+    label = environment_label(env)
     messages.success(request, f'Ambiente ativo alterado para {label}.')
     return redirect(next_path)
 
@@ -434,6 +438,50 @@ def _parse_replay_until_param(raw: str | None):
     if timezone.is_naive(dt):
         dt = timezone.make_aware(dt, sp_tz)
     return dt
+
+
+def _replay_virtual_clock_template_context(request, env: str, sim_state: dict) -> dict[str, str]:
+    """
+    Limites do pregão (BRT) e cursor inicial para o relógio virtual do Replay (template/JS).
+    Fora do Replay ou sem sessão activa devolve strings vazias.
+    """
+    empty: dict[str, str] = {
+        'replay_virtual_cursor_iso': '',
+        'replay_day_start_iso': '',
+        'replay_day_end_iso': '',
+    }
+    if env != ENV_REPLAY or not sim_state.get('effective'):
+        return empty
+    session_d = sim_state.get('session_date')
+    if not session_d:
+        return empty
+    tz = _TZ_BRT
+    day_start = datetime.combine(session_d, time(10, 0), tzinfo=tz)
+    day_end = datetime.combine(session_d, time(18, 30), tzinfo=tz)
+    pref = (
+        AutomationMarketSimPreference.objects.filter(
+            user=request.user,
+            trading_environment=ENV_REPLAY,
+        )
+        .only('replay_until')
+        .first()
+    )
+    cur = getattr(pref, 'replay_until', None) if pref else None
+    if cur is None:
+        cur = day_start
+    else:
+        if timezone.is_naive(cur):
+            cur = timezone.make_aware(cur, tz)
+        cur = cur.astimezone(tz)
+        if cur < day_start:
+            cur = day_start
+        elif cur > day_end:
+            cur = day_end
+    return {
+        'replay_virtual_cursor_iso': cur.isoformat(),
+        'replay_day_start_iso': day_start.isoformat(),
+        'replay_day_end_iso': day_end.isoformat(),
+    }
 
 
 def _parse_watch_tickers_text(raw: str | None) -> list[str]:
@@ -910,7 +958,7 @@ def market_snapshot_json(request):
         'pause_reason': pause_reason,
         'quote_latency_ms': quote_latency_ms,
         # Simulador: mantém o poll do strip financeiro (custódia + marcações) mesmo fora do pregão ao vivo (ex.: replay).
-        'simulator_custody_poll': env == ENV_SIMULATOR,
+        'simulator_custody_poll': env in (ENV_SIMULATOR, ENV_REPLAY),
     }
     if _can_use_endpoint_cache():
         cache.set(cache_key, payload, 1)
@@ -978,6 +1026,11 @@ def quote_candles_json(request):
         limit = 120
     session_day = _parse_session_date_param(request.GET.get('session_date'))
     replay_raw = (request.GET.get('replay_until') or '').strip()
+    replay_day_master = request.GET.get('replay_day_master', '').strip().lower() in (
+        '1',
+        'true',
+        'yes',
+    )
     progressive_raw = (request.GET.get('progressive') or '').strip().lower()
     progressive_mode = session_day is not None and progressive_raw in ('1', 'true', 'yes')
     try:
@@ -997,10 +1050,11 @@ def quote_candles_json(request):
     active_profile = resolve_active_profile(request.user, env)
     active_profile_id = int(getattr(active_profile, 'id', 0) or 0)
     cache_key = (
-        f'quote_candles_json:v7:{env}:{active_profile_id}:{ticker}:{interval_sec}:'
+        f'quote_candles_json:v8:{env}:{active_profile_id}:{ticker}:{interval_sec}:'
         f'{session_day.isoformat() if session_day else "-"}:{replay_raw or "-"}:{limit}'
         f':p:{int(progressive_mode)}:{prog_chunk_index if progressive_mode else 0}:'
         f'{prog_segment_index if progressive_mode else 0}:{chunk_hours if progressive_mode else 0}'
+        f':rdm:{int(replay_day_master)}'
     )
     if _can_use_endpoint_cache():
         hit = cache.get(cache_key)
@@ -1094,11 +1148,19 @@ def quote_candles_json(request):
             limit = min(8000, max(10, limit))
             # Antes: até 250k linhas por GET — estourava CPU/memória no worker e no JSON.
             # Agregação em candles não precisa de tantos pontos brutos; limite duro protege o servidor.
-            max_rows = min(30_000, max(4_000, min(limit, 8000) * 25))
-            rows = list(
-                qs.order_by('-captured_at').values('captured_at', 'quote_data')[:max_rows]
-            )
-            rows.reverse()
+            # ``replay_day_master``: desde o início civil do dia (ordem crescente), para o cache do
+            # replay no browser — a cauda ``-captured_at`` cortava a manhã em dias com 10k+ snapshots.
+            if replay_day_master and not replay_raw:
+                max_rows = min(150_000, max(50_000, min(limit, 8000) * 40))
+                rows = list(
+                    qs.order_by('captured_at').values('captured_at', 'quote_data')[:max_rows]
+                )
+            else:
+                max_rows = min(30_000, max(4_000, min(limit, 8000) * 25))
+                rows = list(
+                    qs.order_by('-captured_at').values('captured_at', 'quote_data')[:max_rows]
+                )
+                rows.reverse()
         else:
             limit = min(500, max(10, limit))
             max_rows = min(5000, limit * 40)
@@ -1724,6 +1786,7 @@ def liquidation_history(request):
     env = get_session_environment(request)
     need_sim = show_both_environments or env == ENV_SIMULATOR
     need_real = show_both_environments or env == ENV_REAL
+    need_replay = show_both_environments or env == ENV_REPLAY
 
     base_pos = Position.objects.select_related('closed_operation')
     if need_sim:
@@ -1734,15 +1797,17 @@ def liquidation_history(request):
             )
             .order_by('-opened_at')[:200]
         )
+    else:
+        positions_sim = Position.objects.none()
+    if need_replay:
         positions_sim_replay = (
             base_pos.filter(
-                trading_environment=ENV_SIMULATOR,
+                trading_environment=ENV_REPLAY,
                 position_lane=Position.Lane.REPLAY_SHADOW,
             )
             .order_by('-opened_at')[:200]
         )
     else:
-        positions_sim = Position.objects.none()
         positions_sim_replay = Position.objects.none()
     if need_real:
         positions_real = base_pos.filter(trading_environment=ENV_REAL).order_by('-opened_at')[:200]
@@ -1755,12 +1820,14 @@ def liquidation_history(request):
             position__trading_environment=ENV_SIMULATOR,
             position__position_lane=Position.Lane.STANDARD,
         ).order_by('-executed_at')[:300]
+    else:
+        liquidations_sim = PositionLiquidation.objects.none()
+    if need_replay:
         liquidations_sim_replay = base_liq.filter(
-            position__trading_environment=ENV_SIMULATOR,
+            position__trading_environment=ENV_REPLAY,
             position__position_lane=Position.Lane.REPLAY_SHADOW,
         ).order_by('-executed_at')[:300]
     else:
-        liquidations_sim = PositionLiquidation.objects.none()
         liquidations_sim_replay = PositionLiquidation.objects.none()
     if need_real:
         liquidations_real = base_liq.filter(position__trading_environment=ENV_REAL).order_by(
@@ -1775,12 +1842,14 @@ def liquidation_history(request):
             position__trading_environment=ENV_SIMULATOR,
             position__position_lane=Position.Lane.STANDARD,
         ).order_by('-closed_at')[:300]
+    else:
+        closed_ops_sim = ClosedOperation.objects.none()
+    if need_replay:
         closed_ops_sim_replay = base_closed.filter(
-            position__trading_environment=ENV_SIMULATOR,
+            position__trading_environment=ENV_REPLAY,
             position__position_lane=Position.Lane.REPLAY_SHADOW,
         ).order_by('-closed_at')[:300]
     else:
-        closed_ops_sim = ClosedOperation.objects.none()
         closed_ops_sim_replay = ClosedOperation.objects.none()
     if need_real:
         closed_ops_real = base_closed.filter(position__trading_environment=ENV_REAL).order_by(
@@ -1805,6 +1874,7 @@ def liquidation_history(request):
             'nav_section': 'liquidations',
             'history_show_sim': need_sim,
             'history_show_real': need_real,
+            'history_show_replay': need_replay,
             'show_both_environments': show_both_environments,
             'positions_sim': positions_sim,
             'positions_sim_replay': positions_sim_replay,
@@ -1846,17 +1916,6 @@ def automations_dashboard(request):
     except Exception:
         logger.exception('sync_automation_sim_preference_from_request automations_dashboard')
     if request.method == 'POST' and request.POST.get('form_name') == 'automation_strategies':
-        live_ticker_selected = (request.POST.get('automation_live_ticker') or '').strip().upper()
-        watch_tickers = set(_watch_tickers_list())
-        if live_ticker_selected and live_ticker_selected not in watch_tickers:
-            messages.error(
-                request,
-                'Ticker do bot inválido para execução. Escolha um ativo monitorado.',
-            )
-            return redirect('trader:automations_dashboard')
-        if active_profile is not None:
-            active_profile.live_ticker = live_ticker_selected
-            active_profile.save(update_fields=['live_ticker', 'updated_at'])
         save_strategy_toggles_from_post(
             request.user,
             env,
@@ -1885,13 +1944,17 @@ def automations_dashboard(request):
             if on
         ]
         exec_summary = ', '.join(exec_titles) if exec_titles else 'nenhuma'
+        live_ticker_note = ''
+        if active_profile is not None:
+            live_ticker_note = (getattr(active_profile, 'live_ticker', '') or '').strip().upper()
         record_automation_thought(
             request.user,
             env,
             (
                 f'Estratégias salvas ({environment_label(env)}). '
                 f'Ativas: {summary}. Execução de ordem: {exec_summary}. '
-                f'Ticker de execução: {live_ticker_selected or "todos os monitorados"}.'
+                f'Ticker de execução: {live_ticker_note or "todos os monitorados"} '
+                f'(definido no cartão Robô principal).'
             ),
             source='estrategias',
             execution_profile=active_profile,
@@ -1905,7 +1968,7 @@ def automations_dashboard(request):
         runtime_env = normalize_environment(request.POST.get('runtime_environment') or env)
         runtime_profile = resolve_active_profile(request.user, runtime_env)
         action = (request.POST.get('runtime_action') or '').strip().lower()
-        if action == 'save_limit':
+        if action in ('save_limit', 'save_all'):
             target_enabled = runtime_enabled(request.user, runtime_env)
         else:
             target_enabled = (request.POST.get('robot_enabled') or '').strip().lower() in (
@@ -1918,6 +1981,17 @@ def automations_dashboard(request):
             max_open_ops = int(request.POST.get('max_open_operations') or '1')
         except (TypeError, ValueError):
             max_open_ops = 1
+        live_ticker_selected = (request.POST.get('automation_live_ticker') or '').strip().upper()
+        watch_tickers = set(_watch_tickers_list())
+        if live_ticker_selected and live_ticker_selected not in watch_tickers:
+            messages.error(
+                request,
+                'Ticker do bot inválido para execução. Escolha um ativo monitorado.',
+            )
+            return redirect('trader:automations_dashboard')
+        if runtime_profile is not None:
+            runtime_profile.live_ticker = live_ticker_selected
+            runtime_profile.save(update_fields=['live_ticker', 'updated_at'])
         row_rt = set_runtime_enabled(
             request.user,
             runtime_env,
@@ -1925,25 +1999,38 @@ def automations_dashboard(request):
             max_open_operations=max_open_ops,
         )
         max_open_final = int(getattr(row_rt, 'max_open_operations', max_open_ops) or 1)
+        ticker_line = live_ticker_selected or 'todos os monitorados'
+        if action in ('save_limit', 'save_all'):
+            thought_msg = (
+                f'Configuração do robô guardada ({environment_label(runtime_env)}). '
+                f'Estado: {"ligado" if target_enabled else "desligado"}. '
+                f'Máx. operações abertas: {max_open_final}. Ticker: {ticker_line}.'
+            )
+            user_msg = (
+                f'Definições guardadas para {environment_label(runtime_env)}. '
+                f'Limite: {max_open_final}. Ticker: {ticker_line}. '
+                f'Robô: {"ativo" if target_enabled else "inativo"}.'
+            )
+        else:
+            thought_msg = (
+                f'Robô de automações {"ATIVADO" if target_enabled else "DESATIVADO"} '
+                f'no ambiente {environment_label(runtime_env)}. '
+                f'Máx. operações abertas simultâneas: {max_open_final}. '
+                f'Ticker de execução: {ticker_line}.'
+            )
+            user_msg = (
+                f'Robô {"ativado" if target_enabled else "desativado"} '
+                f'para {environment_label(runtime_env)}. '
+                f'Limite: {max_open_final}. Ticker do bot: {ticker_line}.'
+            )
         record_automation_thought(
             request.user,
             runtime_env,
-            (
-                f'Robô de automações {"ATIVADO" if target_enabled else "DESATIVADO"} '
-                f'no ambiente {environment_label(runtime_env)}. '
-                f'Máx. operações abertas simultâneas: {max_open_final}.'
-            ),
+            thought_msg,
             source='robo_global',
             execution_profile=runtime_profile,
         )
-        messages.success(
-            request,
-            (
-                f'Robô {"ativado" if target_enabled else "desativado"} '
-                f'para {environment_label(runtime_env)}. '
-                f'Limite de operações abertas: {max_open_final}.'
-            ),
-        )
+        messages.success(request, user_msg)
         return redirect('trader:automations_dashboard')
 
     raw_ticker = (request.GET.get('ticker') or default_primary_ticker()).strip().upper()
@@ -2018,7 +2105,7 @@ def automations_dashboard(request):
         'automation_max_open_operations': runtime_max_open_operations(request.user, env),
         'automation_environment_value': env,
         'replay_fiction_profile': _replay_shadow_custody_panel(request)
-        if env == ENV_SIMULATOR
+        if env == ENV_REPLAY
         else {'show': False},
     }
     use_day_sim = bool(sim_state.get('effective'))
@@ -2079,6 +2166,7 @@ def automations_dashboard(request):
         ctx.get('ticker'),
         len(ctx.get('automation_sim_ticker_choices') or []),
     )
+    ctx.update(_replay_virtual_clock_template_context(request, env, sim_state))
     return render(request, 'trader/automacoes/dashboard.html', ctx)
 
 
@@ -2090,7 +2178,7 @@ def automations_logs_day(request):
     session_env = get_session_environment(request)
     active_profile = resolve_active_profile(request.user, session_env)
     raw_env = (request.GET.get('env') or '').strip().lower()
-    filter_env = raw_env if raw_env in (ENV_REAL, ENV_SIMULATOR) else session_env
+    filter_env = raw_env if raw_env in (ENV_REAL, ENV_SIMULATOR, ENV_REPLAY) else session_env
     filter_profile = resolve_active_profile(request.user, filter_env)
     day = parse_calendar_day_brt(request.GET.get('day'))
     start, end = calendar_day_bounds_brt(day)
@@ -2192,10 +2280,10 @@ def automation_market_simulation(request):
 
 
 def _automation_market_simulation_inner(request, next_path: str):
-    if get_session_environment(request) != ENV_SIMULATOR:
+    if get_session_environment(request) not in (ENV_SIMULATOR, ENV_REPLAY):
         messages.warning(
             request,
-            'Simulação de mercado por dia só está disponível no ambiente Simulador.',
+            'Sessão por dia (snapshots locais) só está disponível no Simulador ou em Replay.',
         )
         return redirect(next_path)
     enabled = request.POST.get('sim_enabled') == 'on'
@@ -2292,7 +2380,7 @@ def automations_state_json(request):
             'environment_label': environment_label(env),
             'strategies': states,
             'market_simulation': {
-                'available': env == ENV_SIMULATOR,
+                'available': env in (ENV_SIMULATOR, ENV_REPLAY),
                 'effective': sim['effective'],
                 'session_date': sim['session_date_iso'],
                 'sim_ticker': sim.get('sim_ticker') or '',
@@ -2339,12 +2427,13 @@ def automation_profile_create(request):
     env = get_session_environment(request)
     next_path = _safe_same_origin_path(request.POST.get('next') or '', '/automacoes/')
     sim = get_automation_market_simulation(request)
-    if env != ENV_SIMULATOR or not sim.get('effective'):
+    if env not in (ENV_SIMULATOR, ENV_REPLAY) or not sim.get('effective'):
         messages.error(
             request,
-            'Para criar perfil, ative primeiro a simulação com ticker e dia válidos.',
+            'Para criar perfil, ative primeiro a sessão com ticker e dia válidos (Simulador ou Replay).',
         )
         return redirect(next_path)
+    st_env = strategy_toggle_storage_environment(env)
     source_profile = resolve_active_profile(request.user, env)
     name = (request.POST.get('profile_name') or '').strip()
     sim_ticker = (sim.get('sim_ticker') or '').strip().upper()
@@ -2362,7 +2451,7 @@ def automation_profile_create(request):
     src_rows = list(
         AutomationStrategyToggle.objects.filter(
             user=request.user,
-            trading_environment=env,
+            trading_environment=st_env,
             execution_profile=source_profile,
         ).values('strategy_key', 'enabled')
     )
@@ -2372,7 +2461,7 @@ def automation_profile_create(request):
             continue
         AutomationStrategyToggle.objects.update_or_create(
             user=request.user,
-            trading_environment=env,
+            trading_environment=st_env,
             strategy_key=key,
             execution_profile=p,
             defaults={'enabled': bool(row.get('enabled'))},
@@ -2402,7 +2491,7 @@ def automation_profile_start(request):
             trading_environment=env,
             execution_profile=p,
         ).delete()
-        if env == ENV_SIMULATOR:
+        if env == ENV_REPLAY:
             try:
                 delete_replay_shadow_ledger()
             except Exception:
@@ -2450,7 +2539,7 @@ def automation_clear_thoughts(request):
     """
     session_env = get_session_environment(request)
     env_raw = (request.POST.get('env') or '').strip().lower()
-    env = env_raw if env_raw in (ENV_SIMULATOR, ENV_REAL) else session_env
+    env = env_raw if env_raw in (ENV_SIMULATOR, ENV_REAL, ENV_REPLAY) else session_env
     active_profile = resolve_active_profile(request.user, env)
     next_path = _safe_same_origin_path(request.POST.get('next') or '', '/automacoes/')
     q_logs = AutomationThought.objects.filter(
@@ -2472,7 +2561,7 @@ def automation_clear_thoughts(request):
         )
     q_markers.delete()
     replay_note = ''
-    if env == ENV_SIMULATOR:
+    if env == ENV_REPLAY:
         try:
             rs = delete_replay_shadow_ledger()
             replay_note = (
@@ -2499,13 +2588,46 @@ def automation_clear_thoughts(request):
 
 @login_required
 @require_POST
+def automation_replay_shadow_ledger_clear(request):
+    """
+    Apaga só o ledger ``replay_shadow`` (posições fictícias e P/L encerrado), sem limpar logs.
+    Só no ambiente Replay.
+    """
+    session_env = get_session_environment(request)
+    next_path = _safe_same_origin_path(request.POST.get('next') or '', '/automacoes/')
+    if session_env != ENV_REPLAY:
+        messages.error(request, 'Limpar o ledger fictício só está disponível no ambiente Replay.')
+        return redirect(next_path)
+    try:
+        rs = delete_replay_shadow_ledger()
+        try:
+            invalidate_collateral_custody_cache()
+        except Exception:
+            logger.exception('invalidate_collateral_custody_cache após limpar ledger replay')
+        messages.success(
+            request,
+            (
+                'Ledger replay fictício limpo: '
+                f'{rs["positions"]} posição(ões), '
+                f'{rs["closed_operations"]} registo(s) de P/L encerrado.'
+            ),
+        )
+    except Exception:
+        logger.exception('delete_replay_shadow_ledger em automation_replay_shadow_ledger_clear')
+        messages.error(request, 'Não foi possível limpar o ledger replay fictício.')
+    return redirect(next_path)
+
+
+@login_required
+@require_POST
 def automation_sim_replay_cursor(request):
     """
     Grava o instante do scrubber de replay em ``AutomationMarketSimPreference.replay_until``
     (mesmo critério temporal que ``replay_until`` em ``quote_candles_json``).
     """
-    if get_session_environment(request) != ENV_SIMULATOR:
-        return JsonResponse({'ok': False, 'error': 'simulator_only'}, status=403)
+    session_env = get_session_environment(request)
+    if session_env != ENV_REPLAY:
+        return JsonResponse({'ok': False, 'error': 'replay_only'}, status=403)
     sim = get_automation_market_simulation(request)
     if not sim.get('effective'):
         return JsonResponse({'ok': False, 'error': 'simulation_inactive'}, status=400)
@@ -2518,7 +2640,10 @@ def automation_sim_replay_cursor(request):
     sym = (sim.get('sim_ticker') or '').strip().upper()
     # Replay envia cursor em alta frequência; evita escrita redundante e tolera lock transitório no SQLite.
     replay_fp = dt.isoformat() if dt else '-'
-    cursor_ck = f'automation:replay_cursor:last_fp:{request.user.id}:{sym}:{sd.isoformat() if sd else "-"}'
+    cursor_ck = (
+        f'automation:replay_cursor:last_fp:{request.user.id}:{session_env}:'
+        f'{sym}:{sd.isoformat() if sd else "-"}'
+    )
     last_fp = cache.get(cursor_ck)
     if last_fp != replay_fp:
         wrote = False
@@ -2526,7 +2651,7 @@ def automation_sim_replay_cursor(request):
             try:
                 AutomationMarketSimPreference.objects.update_or_create(
                     user=request.user,
-                    trading_environment=ENV_SIMULATOR,
+                    trading_environment=session_env,
                     defaults={
                         'enabled': True,
                         'session_date': sd,
@@ -2553,10 +2678,16 @@ def automation_sim_replay_cursor(request):
         if not wrote:
             # Não derruba o replay por lock transitório de escrita.
             pass
+    want_strategies = (request.POST.get('strategies', '1') or '1').strip().lower() not in (
+        '0',
+        'false',
+        'no',
+        'off',
+    )
     try:
         from trader.automacoes.automation_engine import run_automation_session_replay_now
 
-        if sd is not None and sym:
+        if want_strategies and sd is not None and sym:
             # Replay pode avançar em frames muito curtos (1s); para manter comportamento
             # próximo ao "tempo real", dispara estratégias apenas quando muda o bucket
             # do intervalo do motor (ex.: 10s), evitando rajadas de alertas.
@@ -2571,7 +2702,7 @@ def automation_sim_replay_cursor(request):
                 bucket = int(dt.timestamp()) // iv
                 ck = (
                     f'automation:replay_cursor:last_bucket:'
-                    f'{request.user.id}:{ENV_SIMULATOR}:{sym}:{sd.isoformat()}'
+                    f'{request.user.id}:{session_env}:{sym}:{sd.isoformat()}'
                 )
                 prev = cache.get(ck)
                 should_dispatch = prev != bucket
@@ -2584,6 +2715,7 @@ def automation_sim_replay_cursor(request):
                     session_day=sd,
                     sim_ticker=sym,
                     replay_until=dt,
+                    trading_environment=ENV_REPLAY,
                 )
     except Exception:
         logger.exception('automation_sim_replay_cursor: motor de estratégias no instante do replay')
@@ -2597,11 +2729,82 @@ def automation_sim_replay_cursor(request):
 
 
 @login_required
+@require_POST
+def automation_replay_stream_start(request):
+    """
+    Enfileira :func:`~trader.tasks.stream_replay_ticks_task` — mesmo pipeline temporal
+    que :func:`~trader.services.replay_stream_motor.stream_session_replay_ticks`
+    (instantes ``QuoteSnapshot`` em ordem, ``force=True`` no motor).
+    """
+    if get_session_environment(request) != ENV_REPLAY:
+        return JsonResponse({'ok': False, 'error': 'replay_only'}, status=403)
+    sim = get_automation_market_simulation(request)
+    if not sim['effective'] or sim.get('session_date') is None:
+        return JsonResponse({'ok': False, 'error': 'simulation_inactive'}, status=400)
+    if not runtime_enabled(request.user, ENV_REPLAY):
+        return JsonResponse({'ok': False, 'error': 'runtime_disabled'}, status=400)
+
+    body: dict[str, Any] = {}
+    ct = (request.content_type or '').lower()
+    if 'application/json' in ct:
+        try:
+            body = json.loads(request.body.decode() or '{}')
+        except json.JSONDecodeError:
+            body = {}
+    elif request.POST:
+        body = {k: v for k, v in request.POST.items()}
+
+    try:
+        pace_sec = float(body.get('pace_sec', 1.0))
+    except (TypeError, ValueError):
+        pace_sec = 1.0
+    max_snapshots: int | None
+    raw_max = body.get('max_snapshots')
+    if isinstance(raw_max, (list, tuple)) and raw_max:
+        raw_max = raw_max[0]
+    if raw_max is None or raw_max == '':
+        max_snapshots = None
+    else:
+        try:
+            max_snapshots = int(raw_max)
+        except (TypeError, ValueError):
+            max_snapshots = None
+        if max_snapshots is not None and max_snapshots < 1:
+            max_snapshots = None
+
+    sd = sim['session_date']
+    default_t = (sim.get('sim_ticker') or '').strip().upper() or default_primary_ticker()
+    raw_ticker = (body.get('ticker') or default_t)
+    raw_ticker = str(raw_ticker or '').strip().upper()
+    ticker = resolve_ticker_for_local_snapshots(request, raw_ticker)
+
+    from trader.tasks import stream_replay_ticks_task
+
+    ar = stream_replay_ticks_task.delay(
+        int(request.user.id),
+        ticker,
+        sd.isoformat(),
+        pace_sec,
+        max_snapshots,
+    )
+    return JsonResponse(
+        {
+            'ok': True,
+            'task_id': getattr(ar, 'id', None),
+            'ticker': ticker,
+            'session_date': sd.isoformat(),
+            'pace_sec': pace_sec,
+            'max_snapshots': max_snapshots,
+        }
+    )
+
+
+@login_required
 @require_GET
 def automation_replay_day_json(request):
-    """Snapshots do dia em ordem (simulador + simulação de pregão ativa na sessão)."""
-    if get_session_environment(request) != ENV_SIMULATOR:
-        return JsonResponse({'error': 'simulator_only'}, status=403)
+    """Snapshots do dia em ordem (ambiente Replay com sessão activa)."""
+    if get_session_environment(request) != ENV_REPLAY:
+        return JsonResponse({'error': 'replay_only'}, status=403)
     sim = get_automation_market_simulation(request)
     if not sim['effective'] or sim.get('session_date') is None:
         return JsonResponse({'error': 'simulation_inactive'}, status=400)

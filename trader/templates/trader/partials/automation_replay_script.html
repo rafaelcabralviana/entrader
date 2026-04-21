@@ -1,212 +1,114 @@
-{# Incluir no final de extra_js (após candles_volume). Requer ticker, automation_market_sim, default_ticker_js. #}
+{# Incluir no final de extra_js (após candles_volume). Requer ticker, automation_market_sim, replay_* ISO no #automation-replay-bar. #}
 <script>
 (function() {
-  var API = "/automacoes/replay-dia.json";
+  var STREAM_API = "/automacoes/replay-stream/";
   var TICKER = ("{{ ticker|default:''|escapejs }}" || "{{ default_ticker_js|default:''|escapejs }}").trim();
   var SESSION = "{{ automation_market_sim.session_date_iso|default:''|escapejs }}";
-  /** Alinhado a DEFAULT_REPLAY_CHUNK no servidor (trader.automacoes.replay). */
-  var REPLAY_CHUNK = 1000;
-  var frames = [];
-  /** Índice global do primeiro elemento de ``frames`` (0 = primeiro snapshot do dia). */
-  var replayLoadBase = 0;
-  var idx = 0;
-  var replayTotal = 0;
-  var hasMore = false;
-  var replayTruncated = false;
-  var replayLoadGen = 0;
-  var replayEnsureBusy = false;
+
   var playing = false;
+  var virtualTimer = null;
+  /** ~0,5 s de parede entre ticks do relógio virtual. */
+  var WALL_TICK_MS = 500;
+
   try {
     window.__ENTRADE_REPLAY_PLAYING__ = false;
-    /* Só true depois de «Pausa» (não no carregamento) — o dashboard deixa de pollar pensamentos/toasts. */
     window.__ENTRADE_REPLAY_LOG_POLL_SUPPRESS__ = false;
+    window.__ENTRADE_REPLAY_CURSOR_STRATEGIES__ = true;
   } catch (eRP0) {}
-  var timer = null;
+
   var speedEl = document.getElementById('automation-replay-speed');
-  var scrubEl = document.getElementById('automation-replay-scrub');
   var statusEl = document.getElementById('automation-replay-status');
-  /** Sempre reler o nó — evita texto preso em «Carregando…» se o DOM for trocado ou o id recriado. */
   function replayStatusNow() {
     return document.getElementById('automation-replay-status') || statusEl;
   }
   var timeLabel = document.getElementById('automation-replay-time-label');
-  var countEl = document.getElementById('automation-replay-frame-count');
   var btnPlay = document.getElementById('automation-replay-play');
+  var btnContinue = document.getElementById('automation-replay-continue');
   var btnPause = document.getElementById('automation-replay-pause');
   var btnReset = document.getElementById('automation-replay-reset');
+  var btnMotor = document.getElementById('automation-replay-motor-run');
+  var replayBar = document.getElementById('automation-replay-bar');
 
-  if (btnPlay) btnPlay.disabled = true;
+  var startDate = null;
+  var capDate = null;
+  var curVirtual = null;
 
-  /** Mesmo ticker do gráfico (#candles-ticker); fallback ao ticker do servidor. */
   function getReplayTicker() {
     var el = document.getElementById('candles-ticker');
     var v = el && el.value ? String(el.value).trim().toUpperCase() : '';
     return v || TICKER;
   }
 
-  function esc(s) {
-    if (s == null || s === '') return '';
-    return String(s)
-      .replace(/&/g, '&amp;')
-      .replace(/</g, '&lt;')
-      .replace(/>/g, '&gt;')
-      .replace(/"/g, '&quot;');
+  function readSessionEnds() {
+    if (!replayBar) return;
+    var s0 = replayBar.getAttribute('data-replay-start') || '';
+    var c0 = replayBar.getAttribute('data-replay-cap') || '';
+    startDate = s0 ? new Date(s0) : null;
+    capDate = c0 ? new Date(c0) : null;
   }
-  function bookSides(b) {
-    if (!b || typeof b !== 'object') return { bids: [], asks: [] };
-    return { bids: b.bids || b.Bids || [], asks: b.asks || b.Asks || [] };
+
+  /** Lê o instante do cursor a partir da barra (servidor ou último ``persistCursorToBar``). */
+  function loadCursorFromBar() {
+    if (!replayBar) return;
+    var u0 = replayBar.getAttribute('data-replay-cursor') || '';
+    var s0 = replayBar.getAttribute('data-replay-start') || '';
+    var iso = u0 || s0;
+    curVirtual = iso ? new Date(iso) : (startDate ? new Date(startDate.getTime()) : null);
   }
-  function bookField(entry, key) {
-    if (!entry || typeof entry !== 'object') return '—';
-    if (entry[key] !== undefined && entry[key] !== null && entry[key] !== '') return entry[key];
-    var alt = key.charAt(0).toUpperCase() + key.slice(1);
-    if (entry[alt] !== undefined && entry[alt] !== null && entry[alt] !== '') return entry[alt];
-    return '—';
+
+  function readBarBounds() {
+    readSessionEnds();
+    loadCursorFromBar();
   }
-  function dlQuote(q) {
-    if (!q) return '';
-    function fmtBrt(v) {
-      if (v == null || v === '') return v;
-      var d = new Date(v);
-      if (isNaN(d.getTime())) return v;
-      return new Intl.DateTimeFormat('pt-BR', {
-        year: 'numeric', month: '2-digit', day: '2-digit',
-        hour: '2-digit', minute: '2-digit', second: '2-digit',
-        hour12: false, timeZone: 'America/Sao_Paulo'
-      }).format(d);
-    }
-    var rows = [];
-    if (q.ticker !== undefined) rows.push(['Ticker', q.ticker]);
-    if (q.lastPrice !== undefined) rows.push(['Último', q.lastPrice]);
-    if (q.lastQuantity !== undefined) rows.push(['Último vol.', q.lastQuantity]);
-    if (q.status) rows.push(['Status', q.status]);
-    if (q.tradeDateTime) rows.push(['Negócio', fmtBrt(q.tradeDateTime)]);
-    if (q.open !== undefined) rows.push(['Abertura', q.open]);
-    if (q.high !== undefined) rows.push(['Máxima', q.high]);
-    if (q.low !== undefined) rows.push(['Mínima', q.low]);
-    if (q.close !== undefined) rows.push(['Fechamento', q.close]);
-    if (q.dateTime) rows.push(['Timestamp', fmtBrt(q.dateTime)]);
-    var h = '';
-    for (var j = 0; j < rows.length; j++) {
-      h += '<dt>' + esc(rows[j][0]) + '</dt><dd>' + esc(rows[j][1]) + '</dd>';
-    }
-    return h ? '<dl class="grid-dl">' + h + '</dl>' : '';
-  }
-  function dlDetails(d) {
-    if (!d) return '';
-    var h = '';
-    var keys = [
-      ['ticker', 'Ticker'], ['asset', 'Ativo'], ['type', 'Tipo'], ['currency', 'Moeda'],
-      ['minOrderQty', 'Qtd. mín.'], ['maxOrderQty', 'Qtd. máx.'],
-      ['contractMultiplier', 'Multiplicador'], ['priceDivisor', 'Divisor preço']
-    ];
-    for (var i = 0; i < keys.length; i++) {
-      var k = keys[i][0];
-      if (d[k] !== undefined && d[k] !== null && d[k] !== '') {
-        h += '<dt>' + esc(keys[i][1]) + '</dt><dd>' + esc(d[k]) + '</dd>';
-      }
-    }
-    return h ? '<dl class="grid-dl">' + h + '</dl>' : '';
-  }
-  function buildHtml(d) {
-    var err = d.errors || {};
-    var hints = d.operation_hints || {};
-    var lim = '<section class="panel mp-limits"><h2>Limites de operação (referência doc)</h2><dl class="grid-dl">' +
-      '<dt>Mercado</dt><dd>' + esc(hints.mercado) + '</dd>' +
-      '<dt>Base BMF</dt><dd>' + esc(hints.base_bmf) + '</dd>' +
-      '<dt>Máx. ordens / dia (envio)</dt><dd>' + esc(hints.limite_ordens_dia) + '</dd>' +
-      '<dt>Máx. por ordem (boleta)</dt><dd>' + esc(hints.limite_boleta) + '</dd></dl>' +
-      '<p class="hint" style="margin-bottom:0;">Replay: dados locais do dia simulado.</p></section>';
-    var detBody = err.details ? '<p class="err">' + esc(err.details) + '</p>' : (dlDetails(d.details) || (!err.details ? '<p class="hint">Sem dados.</p>' : ''));
-    var det = '<section class="panel"><h2>Detalhes (TickerDetails)</h2>' + detBody + '</section>';
-    var quoBody = err.quote ? '<p class="err">' + esc(err.quote) + '</p>' : (dlQuote(d.quote) || (!err.quote ? '<p class="hint">Sem dados.</p>' : ''));
-    var quo = '<section class="panel"><h2>Cotação (Quote)</h2><p class="hint" style="margin:0 0 0.5rem;">Instante do replay: <strong>' + esc(d._replay_label || '') + '</strong></p>' + quoBody + '</section>';
-    var top = '<div class="mp-cards-top">' + lim + det + quo + '</div>';
-    var bs = bookSides(d.book);
-    var bookInner = '';
-    if (err.book) bookInner = '<p class="err">' + esc(err.book) + '</p>';
-    else if (d.book) {
-      var bids = bs.bids || [];
-      var asks = bs.asks || [];
-      var n = Math.min(Math.max(bids.length, asks.length), 10);
-      if (!bids.length && !asks.length) {
-        bookInner += '<p class="hint">Livro vazio ou formato inesperado.</p>';
-      } else {
-        var rows = '';
-        for (var i = 0; i < n; i++) {
-          var bid = bids[i] || {};
-          var ask = asks[i] || {};
-          rows +=
-            '<tr>' +
-            '<td>' + esc(bookField(bid, 'position')) + '</td>' +
-            '<td class="price"><span class="book-bid-price">' + esc(bookField(bid, 'price')) + '</span></td>' +
-            '<td class="qty">' + esc(bookField(bid, 'quantity')) + '</td>' +
-            '<td class="qty">' + esc(bookField(ask, 'quantity')) + '</td>' +
-            '<td class="price"><span class="book-ask-price">' + esc(bookField(ask, 'price')) + '</span></td>' +
-            '<td>' + esc(bookField(ask, 'position')) + '</td>' +
-            '</tr>';
-        }
-        bookInner +=
-          '<table class="book-compact">' +
-          '<thead><tr><th>Pos. C</th><th>Preço C</th><th>Qtd. C</th><th>Qtd. V</th><th>Preço V</th><th>Pos. V</th></tr></thead>' +
-          '<tbody>' + rows + '</tbody></table>';
-      }
-    } else if (!err.book) bookInner = '<p class="hint">Sem dados.</p>';
-    var bookSec = '<section class="panel" style="margin-top:0;"><h2>Livro de ofertas (Book)</h2>' + bookInner + '</section>';
-    var ab = d.agg_bids || [];
-    var aa = d.agg_asks || [];
-    var aggInner = '';
-    if (err.aggregate_book) aggInner = '<p class="err">' + esc(err.aggregate_book) + '</p>';
-    else if (d.aggregate_book || ab.length || aa.length) {
-      var n2 = Math.min(Math.max(ab.length, aa.length), 10);
-      var rows2 = '';
-      for (var j = 0; j < n2; j++) {
-        var bid2 = ab[j] || {};
-        var ask2 = aa[j] || {};
-        rows2 +=
-          '<tr>' +
-          '<td>' + esc(bookField(bid2, 'position')) + '</td>' +
-          '<td class="price"><span class="book-bid-price">' + esc(bookField(bid2, 'price')) + '</span></td>' +
-          '<td class="qty">' + esc(bookField(bid2, 'quantity')) + '</td>' +
-          '<td class="qty">' + esc(bookField(ask2, 'quantity')) + '</td>' +
-          '<td class="price"><span class="book-ask-price">' + esc(bookField(ask2, 'price')) + '</span></td>' +
-          '<td>' + esc(bookField(ask2, 'position')) + '</td>' +
-          '</tr>';
-      }
-      aggInner =
-        '<table class="book-compact">' +
-        '<thead><tr><th>Pos. C</th><th>Preço C</th><th>Qtd. C</th><th>Qtd. V</th><th>Preço V</th><th>Pos. V</th></tr></thead>' +
-        '<tbody>' + rows2 + '</tbody></table>';
-    } else if (!err.aggregate_book) aggInner = '<p class="hint">Sem dados.</p>';
-    var aggSec = '<section class="panel" style="margin-top:0;"><h2>Livro agregado (Aggregate Book)</h2><p class="hint">Replay local.</p>' + aggInner + '</section>';
-    var lower = '<div class="mp-lower mp-lower--books-only">' + bookSec + aggSec + '</div>';
-    return top + lower;
-  }
-  function applySnapshot(d) {
-    var z = document.getElementById('market-live-zone');
-    if (!z) return;
-    z.innerHTML = buildHtml(d);
+
+  function persistCursorToBar() {
+    if (!replayBar || !curVirtual || !isFinite(curVirtual.getTime())) return;
     try {
-      window.dispatchEvent(new CustomEvent('entrade-replay-frame', { detail: d }));
-    } catch (e1) {}
+      replayBar.setAttribute('data-replay-cursor', curVirtual.toISOString());
+    } catch (ePc) {}
   }
-  function fmtClock(iso) {
+
+  function setPlayButtonsEnabled(on) {
+    if (btnPlay) btnPlay.disabled = !on;
+    if (btnContinue) btnContinue.disabled = !on;
+  }
+
+  function boundsOk() {
+    return (
+      startDate &&
+      capDate &&
+      curVirtual &&
+      isFinite(startDate.getTime()) &&
+      isFinite(capDate.getTime()) &&
+      isFinite(curVirtual.getTime()) &&
+      capDate.getTime() >= startDate.getTime()
+    );
+  }
+
+  function fmtVirtualLabel(d) {
     try {
-      var d = new Date(iso);
-      if (isNaN(d.getTime())) return iso;
+      if (!d || !isFinite(d.getTime())) return '—';
       return new Intl.DateTimeFormat('pt-BR', {
-        hour: '2-digit', minute: '2-digit', second: '2-digit',
-        hour12: false, timeZone: 'America/Sao_Paulo'
+        dateStyle: 'short',
+        timeStyle: 'medium',
+        hour12: false,
+        timeZone: 'America/Sao_Paulo',
       }).format(d);
-    } catch (e2) { return iso; }
+    } catch (e1) {
+      return '—';
+    }
   }
-  /** Throttle: cada frame do replay chamava reload completo do gráfico (GET pesado + parse + SVG). */
+
+  function updateTimeLabel() {
+    if (!timeLabel || !curVirtual) return;
+    timeLabel.textContent = fmtVirtualLabel(curVirtual) + ' (BRT)';
+  }
+
   var _candleReloadLast = 0;
   var _candleReloadTimer = null;
   var CANDLE_RELOAD_MIN_MS = 220;
+
   function getCsrfToken() {
-    // Com CSRF_COOKIE_HTTPONLY=True o cookie não fica acessível no JS.
-    // Fallback: ler o token já renderizado nos formulários da página.
     try {
       var input = document.querySelector('input[name=\"csrfmiddlewaretoken\"]');
       if (input && input.value) return String(input.value);
@@ -218,14 +120,16 @@
       return '';
     }
   }
-  /**
-   * Grava o instante do replay no servidor e corre as estratégias naquele momento
-   * (sem debounce — cada frame reproduzido dispara o mesmo fluxo temporal que o gráfico).
-   */
-  function postReplayCursorImmediate(iso) {
+
+  function postReplayCursorImmediate(iso, withStrategies) {
     var tok = getCsrfToken();
     if (!tok) return;
-    var body = 'replay_until=' + encodeURIComponent(iso == null || iso === '' ? '' : String(iso));
+    var strat = withStrategies !== false;
+    var body =
+      'replay_until=' +
+      encodeURIComponent(iso == null || iso === '' ? '' : String(iso)) +
+      '&strategies=' +
+      (strat ? '1' : '0');
     fetch('/automacoes/sim-replay-cursor/', {
       method: 'POST',
       credentials: 'same-origin',
@@ -236,14 +140,84 @@
       body: body,
     }).catch(function() {});
   }
-  function syncCandlesTo(iso) {
+
+  function formatYmdBrFromIso(ymd) {
+    var p = String(ymd || '').split('-');
+    if (p.length !== 3) return String(ymd || '');
+    return p[2] + '/' + p[1] + '/' + p[0];
+  }
+
+  function ensureSessionOptionForReplay(ymd) {
+    var sel = document.getElementById('candles-session-date');
+    if (!sel || !ymd) return;
+    var v = String(ymd).trim().slice(0, 10);
+    if (v.length !== 10) return;
+    if (sel.querySelector('option[value="' + v + '"]')) return;
+    var o = document.createElement('option');
+    o.value = v;
+    o.textContent = formatYmdBrFromIso(v) + ' (simulação)';
+    sel.appendChild(o);
+  }
+
+  function replayCursorStrategiesOn() {
+    try {
+      window.__ENTRADE_REPLAY_CURSOR_STRATEGIES__ = true;
+    } catch (eCrs) {}
+  }
+
+  function syncCandlesTo(iso, withStrategies) {
     window.__ENTRADE_REPLAY_MODE__ = true;
     window.__ENTRADE_REPLAY_UNTIL__ = iso;
-    postReplayCursorImmediate(iso);
+    var strat = withStrategies;
+    if (strat === undefined) {
+      try {
+        strat = window.__ENTRADE_REPLAY_CURSOR_STRATEGIES__ !== false;
+      } catch (eS1) {
+        strat = true;
+      }
+    }
+    postReplayCursorImmediate(iso, strat);
+    if (SESSION) {
+      try {
+        ensureSessionOptionForReplay(SESSION);
+        var sdc = document.getElementById('candles-session-date');
+        if (sdc) sdc.value = SESSION;
+      } catch (eRSd) {}
+    }
+    if (typeof window.__ENTRADE_REPLAY_TRIM_CHART === 'function' && window.__ENTRADE_REPLAY_CHART_MASTER_READY) {
+      try {
+        if (window.__ENTRADE_REPLAY_TRIM_CHART(iso)) {
+          _candleReloadLast = Date.now();
+          if (_candleReloadTimer) {
+            clearTimeout(_candleReloadTimer);
+            _candleReloadTimer = null;
+          }
+          return;
+        }
+      } catch (eFs) {}
+    }
     var now = Date.now();
     function fire() {
       _candleReloadLast = Date.now();
       _candleReloadTimer = null;
+      if (typeof window.__ENTRADE_REPLAY_TRIM_CHART === 'function') {
+        if (window.__ENTRADE_REPLAY_CHART_MASTER_READY) {
+          try {
+            var uCur = window.__ENTRADE_REPLAY_UNTIL__;
+            if (window.__ENTRADE_REPLAY_TRIM_CHART(uCur)) return;
+          } catch (eTr) {}
+        } else if (typeof window.__ENTRADE_REPLAY_ENSURE_DAY_MASTER === 'function') {
+          window.__ENTRADE_REPLAY_ENSURE_DAY_MASTER(function() {
+            try {
+              var u2 = window.__ENTRADE_REPLAY_UNTIL__;
+              if (typeof window.__ENTRADE_REPLAY_TRIM_CHART === 'function') {
+                window.__ENTRADE_REPLAY_TRIM_CHART(u2);
+              }
+            } catch (eTr2) {}
+          });
+          return;
+        }
+      }
       if (typeof window.__ENTRADE_CANDLES_RELOAD__ === 'function') {
         window.__ENTRADE_CANDLES_RELOAD__();
       }
@@ -259,390 +233,130 @@
     if (_candleReloadTimer) clearTimeout(_candleReloadTimer);
     _candleReloadTimer = setTimeout(fire, CANDLE_RELOAD_MIN_MS - (now - _candleReloadLast));
   }
-  function replayDenom() {
-    return replayTotal > 0 ? replayTotal : Math.max(frames.length, 1);
-  }
-  function updateScrubberRange() {
-    if (!scrubEl) return;
-    var maxIdx = Math.max(0, replayDenom() - 1);
-    scrubEl.max = String(maxIdx);
-    scrubEl.disabled = replayDenom() === 0 && frames.length === 0;
-  }
-  function applyFrame(g) {
-    if (g < 0) return;
-    var li = g - replayLoadBase;
-    if (li >= 0 && li < frames.length) {
-      idx = g;
-      var fr = frames[li];
-      var iso = fr.captured_at;
-      var d = Object.assign({}, fr);
-      d._replay_label = fmtClock(iso);
-      applySnapshot(d);
-      syncCandlesTo(iso);
-      if (scrubEl) scrubEl.value = String(g);
-      if (timeLabel) {
-        timeLabel.textContent = fmtClock(iso) + ' · frame ' + (g + 1) + '/' + replayDenom();
-      }
-      if (countEl) {
-        countEl.textContent = hasMore ? '(' + frames.length + ' carregados)' : '';
-      }
-      return;
+
+  function clearVirtualTimer() {
+    if (virtualTimer) {
+      clearInterval(virtualTimer);
+      virtualTimer = null;
     }
-    ensureFramesForGlobal(g, function() {
-      var li2 = g - replayLoadBase;
-      if (li2 >= 0 && li2 < frames.length) {
-        applyFrame(g);
-      } else if (replayTotal > 0) {
-        applyFrame(Math.min(g, Math.max(0, replayTotal - 1)));
-      }
-    });
   }
-  function delayMs(fromIdx, toIdx) {
-    var lf = fromIdx - replayLoadBase;
-    var lt = toIdx - replayLoadBase;
-    if (fromIdx < 0 || toIdx < 0 || lf < 0 || lf >= frames.length || lt < 0 || lt >= frames.length || lf >= lt) {
-      return 300;
-    }
+
+  function tickVirtual() {
+    if (!playing || !curVirtual || !capDate) return;
     var sp = parseFloat(speedEl && speedEl.value ? speedEl.value : '1') || 1;
-    var a = new Date(frames[lf].captured_at).getTime();
-    var b = new Date(frames[lt].captured_at).getTime();
-    if (!isFinite(a) || !isFinite(b)) return 300;
-    var delta = Math.max(40, b - a);
-    var ms = delta / sp;
-    if (!isFinite(ms) || ms < 0) return 300;
-    return Math.min(15000, ms);
-  }
-  function clearTimer() {
-    if (timer) {
-      clearTimeout(timer);
-      timer = null;
-    }
-  }
-  function loopStep() {
-    if (!playing) return;
-    if (replayTotal <= 1 && frames.length <= 1 && !hasMore) {
-      playing = false;
-      clearTimer();
-      if (btnPlay) btnPlay.disabled = false;
-      if (btnPause) btnPause.disabled = true;
-      if (statusEl) statusEl.textContent = 'Instante único (1 snapshot) — não há sequência para reproduzir.';
+    if (sp < 0.25) sp = 0.25;
+    if (sp > 512) sp = 512;
+    var nextMs = curVirtual.getTime() + WALL_TICK_MS * sp;
+    var capMs = capDate.getTime();
+    if (nextMs >= capMs) {
+      curVirtual = new Date(capMs);
+      persistCursorToBar();
+      updateTimeLabel();
+      syncCandlesTo(curVirtual.toISOString(), true);
+      pauseVirtual(true);
+      var stEnd = replayStatusNow();
+      if (stEnd) stEnd.textContent = 'Fim do intervalo do pregão (relógio virtual).';
       return;
     }
-    var nextIdx = idx + 1;
-    var nextLi = nextIdx - replayLoadBase;
-    if (nextLi >= frames.length) {
-      if (hasMore) {
-        if (statusEl) statusEl.textContent = 'Carregando mais instantes…';
-        var gP = replayLoadGen;
-        fetchReplayChunk(replayLoadBase + frames.length).then(function(data) {
-          if (gP !== replayLoadGen) return;
-          if (!mergeReplayResponse(data, gP)) return;
-          if (!playing) return;
-          nextLi = nextIdx - replayLoadBase;
-          if (nextLi >= 0 && nextLi < frames.length) {
-            var wait = delayMs(idx, nextIdx);
-            timer = setTimeout(function() {
-              if (!playing) return;
-              applyFrame(nextIdx);
-              loopStep();
-            }, wait);
-          } else if (!hasMore) {
-            playing = false;
-            clearTimer();
-            if (btnPlay) btnPlay.disabled = false;
-            if (btnPause) btnPause.disabled = true;
-            if (statusEl) statusEl.textContent = 'Fim do pregão (replay).';
-          } else {
-            loopStep();
-          }
-        }).catch(function() {
-          playing = false;
-          clearTimer();
-          if (btnPlay) btnPlay.disabled = false;
-          if (btnPause) btnPause.disabled = true;
-          if (statusEl) statusEl.textContent = 'Falha ao carregar próximo trecho do replay.';
-        });
-        return;
-      }
-      playing = false;
-      clearTimer();
-      if (btnPlay) btnPlay.disabled = false;
-      if (btnPause) btnPause.disabled = true;
-      if (statusEl) statusEl.textContent = 'Fim do pregão (replay).';
-      return;
-    }
-    var wait = delayMs(idx, nextIdx);
-    timer = setTimeout(function() {
-      if (!playing) return;
-      applyFrame(nextIdx);
-      loopStep();
-    }, wait);
+    curVirtual = new Date(nextMs);
+    persistCursorToBar();
+    updateTimeLabel();
+    syncCandlesTo(curVirtual.toISOString(), true);
   }
-  function play() {
-    clearTimer();
-    if (!frames.length) return;
-    if (replayTotal > 0 && idx >= replayTotal - 1) idx = 0;
-    playing = true;
+
+  function pauseVirtual(reachedEnd) {
+    playing = false;
     try {
-      window.dispatchEvent(new CustomEvent('entrade:custody-replay-tab', { bubbles: true }));
-    } catch (eRPTab) {}
+      window.__ENTRADE_REPLAY_PLAYING__ = false;
+      window.__ENTRADE_REPLAY_LOG_POLL_SUPPRESS__ = !reachedEnd;
+    } catch (eRP2) {}
+    clearVirtualTimer();
+    replayCursorStrategiesOn();
+    setPlayButtonsEnabled(true);
+    if (btnPause) btnPause.disabled = true;
+    if (!reachedEnd) {
+      var st = replayStatusNow();
+      if (st) st.textContent = 'Pausado.';
+      if (curVirtual && isFinite(curVirtual.getTime())) {
+        persistCursorToBar();
+        postReplayCursorImmediate(curVirtual.toISOString(), true);
+      }
+    }
+  }
+
+  /**
+   * @param {boolean} fromSessionStart true = cursor no abrir do pregão (BRT); false = retoma no instante actual (após pausa ou arrasto).
+   */
+  function resumePlayVirtual(fromSessionStart) {
+    readSessionEnds();
+    if (
+      !startDate ||
+      !capDate ||
+      !isFinite(startDate.getTime()) ||
+      !isFinite(capDate.getTime()) ||
+      capDate.getTime() < startDate.getTime()
+    ) {
+      var st0 = replayStatusNow();
+      if (st0) st0.textContent = 'Datas do pregão em falta — recarregue após aplicar a sessão.';
+      return;
+    }
+    if (fromSessionStart === true) {
+      curVirtual = new Date(startDate.getTime());
+      persistCursorToBar();
+    } else {
+      if (!curVirtual || !isFinite(curVirtual.getTime())) {
+        loadCursorFromBar();
+      }
+    }
+    if (!curVirtual || !isFinite(curVirtual.getTime())) {
+      var stMiss = replayStatusNow();
+      if (stMiss) stMiss.textContent = 'Instante do relógio em falta.';
+      return;
+    }
+    var tok = getCsrfToken();
+    if (!tok) {
+      var stCs = replayStatusNow();
+      if (stCs) stCs.textContent = 'CSRF em falta — recarregue a página.';
+      return;
+    }
+    if (curVirtual.getTime() >= capDate.getTime()) {
+      curVirtual = new Date(startDate.getTime());
+      persistCursorToBar();
+    }
+    replayCursorStrategiesOn();
+    playing = true;
     try {
       window.__ENTRADE_REPLAY_PLAYING__ = true;
       window.__ENTRADE_REPLAY_LOG_POLL_SUPPRESS__ = false;
     } catch (eRP1) {}
-    if (btnPlay) btnPlay.disabled = true;
+    setPlayButtonsEnabled(false);
     if (btnPause) btnPause.disabled = false;
-    if (statusEl) statusEl.textContent = 'Reproduzindo…';
-    applyFrame(idx);
-    loopStep();
+    var stP = replayStatusNow();
+    if (stP) stP.textContent = 'Relógio virtual a correr…';
+    updateTimeLabel();
+    syncCandlesTo(curVirtual.toISOString(), true);
+    clearVirtualTimer();
+    virtualTimer = setInterval(tickVirtual, WALL_TICK_MS);
   }
-  function pause() {
-    playing = false;
-    try {
-      window.__ENTRADE_REPLAY_PLAYING__ = false;
-      window.__ENTRADE_REPLAY_LOG_POLL_SUPPRESS__ = true;
-    } catch (eRP2) {}
-    clearTimer();
-    if (btnPlay) btnPlay.disabled = false;
-    if (btnPause) btnPause.disabled = true;
-    if (statusEl) statusEl.textContent = 'Pausado.';
-    /* Garante que o Celery use o mesmo instante do frame visível (debounce no schedule). */
-    var _liPause = idx - replayLoadBase;
-    if (frames.length && _liPause >= 0 && _liPause < frames.length) {
-      var frp = frames[_liPause];
-      if (frp && frp.captured_at) postReplayCursorImmediate(frp.captured_at);
+
+  function resetVirtual() {
+    pauseVirtual(false);
+    readSessionEnds();
+    if (startDate && isFinite(startDate.getTime())) {
+      curVirtual = new Date(startDate.getTime());
     }
-  }
-  function resetToStart() {
-    pause();
-    if (frames.length || replayTotal > 0) applyFrame(0);
+    persistCursorToBar();
+    updateTimeLabel();
+    if (boundsOk()) {
+      syncCandlesTo(curVirtual.toISOString(), true);
+    }
     try {
       window.__ENTRADE_REPLAY_LOG_POLL_SUPPRESS__ = false;
     } catch (eRS) {}
+    var stR = replayStatusNow();
+    if (stR) stR.textContent = 'Reinício — instante no início do pregão (BRT).';
   }
-  function mergeReplayResponse(data, validGen) {
-    if (data == null || typeof data !== 'object') return false;
-    if (validGen != null && validGen !== replayLoadGen) return false;
-    var nf = data.frames || [];
-    frames = frames.concat(nf);
-    if (data.meta) {
-      if (typeof data.meta.total === 'number') {
-        replayTotal = data.meta.total;
-      }
-      hasMore = !!data.meta.has_more;
-      if (data.meta.truncated) {
-        replayTruncated = true;
-      }
-    }
-    updateScrubberRange();
-    return true;
-  }
-  function mergeReplaySeek(data, validGen) {
-    if (data == null || typeof data !== 'object') return false;
-    if (validGen != null && validGen !== replayLoadGen) return false;
-    var nf = data.frames || [];
-    frames = nf.slice();
-    if (data.meta) {
-      if (typeof data.meta.total === 'number') {
-        replayTotal = data.meta.total;
-      }
-      hasMore = !!data.meta.has_more;
-      if (data.meta.truncated) {
-        replayTruncated = true;
-      }
-      if (typeof data.meta.offset === 'number') {
-        replayLoadBase = data.meta.offset;
-      }
-    }
-    updateScrubberRange();
-    return true;
-  }
-  function refreshReplayStatus() {
-    var el = replayStatusNow();
-    if (!el) return;
-    var tot = replayTotal > 0 ? replayTotal : Math.max(frames.length, 1);
-    var tail = hasMore ? ' — ainda há mais no servidor (carrega ao avançar).' : '';
-    if (replayTruncated) {
-      el.textContent = 'Replay: até ' + tot + ' instantes (limite).' + tail;
-    } else {
-      el.textContent = 'Pronto: ' + frames.length + ' de ' + tot + ' instantes.' + tail;
-    }
-  }
-  function setReplayStatusFromMeta(data, t) {
-    var el = replayStatusNow();
-    if (!el) return;
-    var m = data && data.meta;
-    if (m && typeof m.total === 'number') {
-      replayTotal = m.total;
-    }
-    hasMore = !!(m && m.has_more);
-    replayTruncated = !!(m && m.truncated);
-    var tot = replayTotal > 0 ? replayTotal : frames.length;
-    var tail = hasMore ? ' — ainda há mais no servidor (carrega ao avançar).' : '';
-    if (replayTruncated) {
-      el.textContent = 'Replay: até ' + tot + ' instantes (limite).' + tail;
-    } else {
-      el.textContent = 'Pronto: ' + frames.length + ' de ' + tot + ' instantes.' + tail;
-    }
-  }
-  function fetchReplayChunk(serverOffset, opts) {
-    opts = opts || {};
-    var t = getReplayTicker();
-    var url =
-      API +
-      '?ticker=' +
-      encodeURIComponent(t) +
-      '&offset=' +
-      encodeURIComponent(String(serverOffset)) +
-      '&limit=' +
-      encodeURIComponent(String(REPLAY_CHUNK));
-    if (serverOffset === 0 && opts.alignFirst) {
-      try {
-        var w = window.__ENTRADE_CHART_WINDOW_ISO__;
-        if (w && w.first_bucket_start) {
-          url +=
-            '&align_bucket_start=' + encodeURIComponent(String(w.first_bucket_start));
-        }
-      } catch (eAlign) {}
-    }
-    return fetch(url, { credentials: 'same-origin', headers: { 'Accept': 'application/json' } })
-      .then(function(r) {
-        if (!r.ok) throw new Error('HTTP ' + r.status);
-        return r.json();
-      });
-  }
-  function seekReplayLoad(globalIdx, done) {
-    if (replayEnsureBusy) {
-      setTimeout(function() {
-        seekReplayLoad(globalIdx, done);
-      }, 40);
-      return;
-    }
-    replayEnsureBusy = true;
-    var gE = replayLoadGen;
-    var cap = replayTotal > 0 ? replayTotal - 1 : 0;
-    var off = Math.max(0, Math.min(globalIdx, cap));
-    fetchReplayChunk(off)
-      .then(function(data) {
-        replayEnsureBusy = false;
-        if (gE !== replayLoadGen) return;
-        if (!mergeReplaySeek(data, gE)) return;
-        if (done) done();
-      })
-      .catch(function() {
-        replayEnsureBusy = false;
-        if (done) done();
-      });
-  }
-  function ensureFramesForGlobal(g, done) {
-    var li = g - replayLoadBase;
-    if (li >= 0 && li < frames.length) {
-      if (done) done();
-      return;
-    }
-    if (g < replayLoadBase) {
-      seekReplayLoad(g, done);
-      return;
-    }
-    if (!hasMore) {
-      if (done) done();
-      return;
-    }
-    if (replayEnsureBusy) {
-      setTimeout(function() {
-        ensureFramesForGlobal(g, done);
-      }, 40);
-      return;
-    }
-    replayEnsureBusy = true;
-    var gE = replayLoadGen;
-    fetchReplayChunk(replayLoadBase + frames.length)
-      .then(function(data) {
-        if (gE !== replayLoadGen) {
-          replayEnsureBusy = false;
-          return;
-        }
-        mergeReplayResponse(data, gE);
-        replayEnsureBusy = false;
-        li = g - replayLoadBase;
-        if ((li >= 0 && li < frames.length) || !hasMore) {
-          if (done) done();
-        } else {
-          ensureFramesForGlobal(g, done);
-        }
-      })
-      .catch(function() {
-        replayEnsureBusy = false;
-        if (done) done();
-      });
-  }
-  function loadFrames() {
-    var t = getReplayTicker();
-    if (!t || !SESSION) {
-      var st0 = replayStatusNow();
-      if (st0) st0.textContent = 'Ticker ou data ausente.';
-      if (btnPlay) btnPlay.disabled = true;
-      return;
-    }
-    replayLoadGen += 1;
-    var gen = replayLoadGen;
-    frames = [];
-    replayLoadBase = 0;
-    idx = 0;
-    replayTotal = 0;
-    hasMore = false;
-    replayTruncated = false;
-    var stLoad = replayStatusNow();
-    if (stLoad) stLoad.textContent = 'Carregando snapshots (primeiro trecho)…';
-    if (btnPlay) btnPlay.disabled = true;
-    updateScrubberRange();
-    fetchReplayChunk(0, { alignFirst: true })
-      .then(function(data) {
-        if (gen !== replayLoadGen) return;
-        frames = data.frames || [];
-        replayLoadBase = 0;
-        if (data.meta) {
-          if (typeof data.meta.total === 'number') {
-            replayTotal = data.meta.total;
-          }
-          hasMore = !!data.meta.has_more;
-          if (typeof data.meta.offset === 'number') {
-            replayLoadBase = data.meta.offset;
-          }
-        }
-        if (!replayTotal) {
-          replayTotal = frames.length;
-        }
-        updateScrubberRange();
-        if (!frames.length) {
-          var stEmpty = replayStatusNow();
-          if (stEmpty) {
-            stEmpty.textContent =
-              'Sem QuoteSnapshot para ' + t + ' neste dia no banco. O gráfico usa o dia da simulação; inclua esse ticker na coleta ou escolha outro ativo.';
-          }
-          if (btnPlay) btnPlay.disabled = true;
-          return;
-        }
-        setReplayStatusFromMeta(data, t);
-        if (btnPlay) btnPlay.disabled = false;
-        window.__ENTRADE_REPLAY_MODE__ = true;
-        syncSessionDateSelect(function() {
-          if (gen !== replayLoadGen) return;
-          applyFrame(replayLoadBase);
-          refreshReplayStatus();
-        });
-        setTimeout(function() {
-          if (gen !== replayLoadGen) return;
-          refreshReplayStatus();
-        }, 650);
-      })
-      .catch(function() {
-        if (gen !== replayLoadGen) return;
-        var stErr = replayStatusNow();
-        if (stErr) stErr.textContent = 'Falha ao carregar replay.';
-        if (btnPlay) btnPlay.disabled = true;
-      });
-  }
+
   function syncSessionDateSelect(done) {
     var sel = document.getElementById('candles-session-date');
     var btn = document.getElementById('candles-refresh');
@@ -650,51 +364,121 @@
       if (done) done();
       return;
     }
+    ensureSessionOptionForReplay(SESSION);
     var tries = 0;
-    function tick() {
+    function tickSd() {
       if (sel.querySelector('option[value="' + SESSION + '"]')) {
         sel.value = SESSION;
         if (btn) btn.click();
-        setTimeout(function() { if (done) done(); }, 450);
+        setTimeout(function() { if (done) done(); }, 200);
         return;
       }
-      if (tries++ < 120) setTimeout(tick, 100);
+      if (tries++ < 120) setTimeout(tickSd, 50);
       else if (done) done();
     }
-    setTimeout(tick, 100);
+    setTimeout(tickSd, 0);
   }
-  if (btnPlay) btnPlay.addEventListener('click', function() { play(); });
-  if (btnPause) btnPause.addEventListener('click', function() { pause(); });
-  if (btnReset) btnReset.addEventListener('click', function() { resetToStart(); });
-  if (scrubEl) {
-    scrubEl.addEventListener('input', function() {
-      pause();
-      var v = parseInt(scrubEl.value, 10);
-      if (!isFinite(v)) return;
-      var cap = Math.max(0, replayDenom() - 1);
-      v = Math.max(0, Math.min(cap, v));
-      var liSc = v - replayLoadBase;
-      if (liSc < 0 || liSc >= frames.length) {
-        var stScrub = replayStatusNow();
-        if (stScrub) stScrub.textContent = 'Carregando trecho do replay…';
-        ensureFramesForGlobal(v, function() {
-          var j = Math.min(v, Math.max(0, (replayTotal > 0 ? replayTotal - 1 : 0)));
-          applyFrame(j);
-          refreshReplayStatus();
-        });
-      } else {
-        applyFrame(v);
+
+  function primeReplayChart() {
+    try {
+      if (typeof window.__ENTRADE_REPLAY_INVALIDATE_DAY_MASTER === 'function') {
+        window.__ENTRADE_REPLAY_INVALIDATE_DAY_MASTER();
+      }
+    } catch (eInv) {}
+    readBarBounds();
+    if (!boundsOk()) {
+      var st = replayStatusNow();
+      if (st) st.textContent = 'Configure ticker e dia da sessão.';
+      setPlayButtonsEnabled(false);
+      return;
+    }
+    setPlayButtonsEnabled(true);
+    updateTimeLabel();
+    syncSessionDateSelect(function() {
+      if (curVirtual && isFinite(curVirtual.getTime())) {
+        persistCursorToBar();
+        syncCandlesTo(curVirtual.toISOString(), true);
+      }
+      var stOk = replayStatusNow();
+      if (stOk) {
+        stOk.textContent =
+          'Relógio pronto — Iniciar ou Continuar avançam a partir do instante actual; Reinício repõe o abrir do pregão.';
       }
     });
   }
+
+  function enqueueReplayMotor() {
+    var tok = getCsrfToken();
+    if (!tok) {
+      var stCs = replayStatusNow();
+      if (stCs) stCs.textContent = 'CSRF em falta — recarregue a página.';
+      return;
+    }
+    var sp = parseFloat(speedEl && speedEl.value ? speedEl.value : '1') || 1;
+    if (sp < 0.25) sp = 0.25;
+    if (sp > 512) sp = 512;
+    var paceSec = 1.0 / sp;
+    var maxEl = document.getElementById('automation-replay-max');
+    var maxRaw = maxEl && maxEl.value ? String(maxEl.value).trim() : '';
+    var maxPayload = null;
+    if (maxRaw !== '') {
+      var mi = parseInt(maxRaw, 10);
+      if (isFinite(mi) && mi >= 1) maxPayload = mi;
+    }
+    var stQ = replayStatusNow();
+    if (stQ) stQ.textContent = 'A enfileirar motor do replay no servidor…';
+    fetch(STREAM_API, {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-CSRFToken': tok,
+      },
+      body: JSON.stringify({
+        pace_sec: paceSec,
+        max_snapshots: maxPayload,
+        ticker: getReplayTicker(),
+      }),
+    })
+      .then(function(r) {
+        return r.json().then(function(j) {
+          return { status: r.status, j: j };
+        });
+      })
+      .then(function(out) {
+        var st = replayStatusNow();
+        if (!out.j || !out.j.ok) {
+          var err = out.j && out.j.error ? String(out.j.error) : 'HTTP ' + out.status;
+          if (st) st.textContent = 'Motor: ' + err;
+          return;
+        }
+        var tid = out.j.task_id ? String(out.j.task_id) : '';
+        if (st) {
+          st.textContent =
+            'Motor enfileirado (Celery)' + (tid ? ' · ' + tid : '') + '. O relógio virtual não foi alterado.';
+        }
+      })
+      .catch(function() {
+        var stX = replayStatusNow();
+        if (stX) stX.textContent = 'Erro de rede ao enfileirar motor.';
+      });
+  }
+
+  if (btnPlay) btnPlay.addEventListener('click', function() { resumePlayVirtual(false); });
+  if (btnContinue) btnContinue.addEventListener('click', function() { resumePlayVirtual(false); });
+  if (btnPause) btnPause.addEventListener('click', function() { pauseVirtual(false); });
+  if (btnReset) btnReset.addEventListener('click', function() { resetVirtual(); });
+  if (btnMotor) btnMotor.addEventListener('click', function() { enqueueReplayMotor(); });
+
   var candlesTickerEl = document.getElementById('candles-ticker');
   if (candlesTickerEl) {
     candlesTickerEl.addEventListener('change', function() {
-      loadFrames();
+      resetVirtual();
     });
   }
+
   setTimeout(function() {
-    loadFrames();
+    primeReplayChart();
   }, 360);
 })();
 </script>

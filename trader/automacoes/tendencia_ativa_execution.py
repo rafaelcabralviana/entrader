@@ -12,7 +12,13 @@ from trader.automacoes.market_entry_trailing import (
     stage_replay_entry_for_trailing,
 )
 from trader.custody_simulator import record_bracket_execution_marker
-from trader.environment import ENV_SIMULATOR, get_current_environment, normalize_environment, order_api_mode_label
+from trader.environment import (
+    ENV_REPLAY,
+    ENV_SIMULATOR,
+    get_current_environment,
+    normalize_environment,
+    order_api_mode_label,
+)
 from trader.models import Position
 from trader.services.operations_history import (
     infer_execution_price,
@@ -107,7 +113,7 @@ def execute_trend_ativa_bracket(
             except Exception:
                 logger.exception('trend_ativa thought order sent panel')
 
-        if get_current_environment() == ENV_SIMULATOR:
+        if get_current_environment() in (ENV_SIMULATOR, ENV_REPLAY):
             try:
                 record_bracket_execution_marker(
                     ticker=sym,
@@ -235,7 +241,7 @@ def execute_trend_ativa_bracket_replay_shadow(
             except Exception:
                 logger.exception('trend_ativa replay shadow thought')
 
-        if get_current_environment() == ENV_SIMULATOR:
+        if get_current_environment() in (ENV_SIMULATOR, ENV_REPLAY):
             try:
                 record_bracket_execution_marker(
                     ticker=sym,

@@ -418,6 +418,11 @@
       background: rgba(74, 222, 128, 0.2);
       border-color: rgba(74, 222, 128, 0.5);
     }
+    .env-badge--replay {
+      color: #5b21b6;
+      background: rgba(196, 181, 253, 0.35);
+      border-color: rgba(139, 92, 246, 0.55);
+    }
     .env-switch-form {
       display: inline-flex;
       align-items: center;
@@ -1147,7 +1152,7 @@
         <span class="topbar-title">{{ page_title|default:"Privado" }}</span>
         {% if user.is_authenticated %}
         <div class="topbar-env" aria-label="Ambiente de operação">
-          <span class="env-badge {% if trading_environment_is_real %}env-badge--real{% else %}env-badge--sim{% endif %}">
+          <span class="env-badge {% if trading_environment_is_real %}env-badge--real{% elif trading_environment_is_replay %}env-badge--replay{% else %}env-badge--sim{% endif %}">
             {{ trading_environment_label }}
           </span>
           <form method="post" action="{% url 'trader:set_trading_environment' %}" class="env-switch-form">
@@ -1155,6 +1160,7 @@
             <input type="hidden" name="next" value="{{ request.get_full_path }}">
             <select name="environment" aria-label="Selecionar ambiente">
               <option value="simulator" {% if trading_environment_is_simulator %}selected{% endif %}>Simulador</option>
+              <option value="replay" {% if trading_environment_is_replay %}selected{% endif %}>Replay</option>
               <option value="real" {% if trading_environment_is_real %}selected{% endif %}>Real</option>
             </select>
             <button type="submit" class="env-switch-btn">Aplicar</button>

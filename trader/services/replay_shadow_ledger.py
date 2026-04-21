@@ -1,4 +1,4 @@
-"""Ledger local ``replay_shadow`` (simulador, replay fictício — sem corretora)."""
+"""Ledger local ``replay_shadow`` (ambiente Replay — ordens fictícias, sem corretora)."""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ def delete_replay_shadow_ledger() -> dict[str, int]:
     Retorna contagens **antes** do delete (útil para mensagens).
     """
     qs = Position.objects.filter(
-        trading_environment=Position.TradingEnvironment.SIMULATOR,
+        trading_environment=Position.TradingEnvironment.REPLAY,
         position_lane=Position.Lane.REPLAY_SHADOW,
     )
     n_pos = qs.count()
@@ -30,7 +30,7 @@ def delete_replay_shadow_ledger() -> dict[str, int]:
 def replay_shadow_ledger_stats() -> dict[str, int]:
     """Contagens actuais (sem apagar)."""
     qs = Position.objects.filter(
-        trading_environment=Position.TradingEnvironment.SIMULATOR,
+        trading_environment=Position.TradingEnvironment.REPLAY,
         position_lane=Position.Lane.REPLAY_SHADOW,
     )
     return {

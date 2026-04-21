@@ -1,22 +1,27 @@
 <div id="sidebar-simulacao" class="sidebar-sim-wrap sidebar-text" style="margin-top:0.55rem;padding:0.6rem 0.75rem 0.85rem;border-top:1px solid var(--border);">
-  <p class="sidebar-boleta-title">Simulação (teste)</p>
   {% if trading_environment_is_simulator %}
+  <p class="sidebar-boleta-title">Simulador</p>
+  <p class="sim-lead sim-lead--one automation-sim-real-only--compact" style="margin:0;">
+    Sessão por ticker e dia com snapshots ficou apenas no ambiente <strong>Replay</strong>. Use a barra superior para alternar.
+  </p>
+  {% elif trading_environment_is_replay %}
+  <p class="sidebar-boleta-title">Replay (pregão gravado)</p>
   <div class="automation-sim-wrap automation-sim-wrap--compact" style="margin-bottom:0;">
     {% if automation_market_sim.effective %}
     <div class="automation-sim-compact-head" style="margin-bottom:0.25rem;">
       <span class="sim-active-badge sim-active-badge--inline" role="status"><strong>{{ automation_market_sim.sim_ticker }}</strong> · {{ automation_market_sim.label_br }}</span>
     </div>
     {% endif %}
-    <p class="sim-lead sim-lead--one">Ticker + dia com snapshots; depois <strong>Play</strong> no replay.</p>
-    <form method="post" action="{% url 'trader:automation_market_simulation' %}" class="automation-sim-form automation-sim-form--compact" id="automation-sim-form">
+    <p class="sim-lead sim-lead--one">Escolha ação e dia; ordens são <strong>fictícias</strong> (ledger replay). O gráfico segue o instante simulado; opcionalmente enfileire o motor em batch no servidor.</p>
+    <form method="post" action="{% url 'trader:automation_market_simulation' %}" class="automation-sim-form automation-sim-form--compact" id="automation-replay-session-form">
       {% csrf_token %}
       <input type="hidden" name="next" value="{{ request.path }}">
       <label class="sim-check">
         <input type="checkbox" name="sim_enabled" value="on" {% if automation_market_sim.enabled_flag %}checked{% endif %}>
-        Ativar
+        Ativar sessão
       </label>
       <label>Ação
-        <select id="automation-sim-ticker" name="sim_ticker" style="max-width:100%;" {% if not automation_sim_ticker_choices %}disabled{% endif %}>
+        <select id="automation-replay-ticker" name="sim_ticker" style="max-width:100%;" {% if not automation_sim_ticker_choices %}disabled{% endif %}>
           <option value="">—</option>
           {% for sym in automation_sim_ticker_choices %}
           <option value="{{ sym }}" {% if sym == automation_sim_selected_ticker %}selected{% endif %}>{{ sym }}</option>
@@ -24,7 +29,7 @@
         </select>
       </label>
       <label>Dia
-        <select id="automation-sim-session-date" name="session_date" style="max-width:100%;" {% if not automation_sim_date_choices %}disabled{% endif %}>
+        <select id="automation-replay-session-date" name="session_date" style="max-width:100%;" {% if not automation_sim_date_choices %}disabled{% endif %}>
           <option value="">—</option>
           {% for c in automation_sim_date_choices %}
           <option value="{{ c.iso }}" {% if automation_market_sim.effective and c.iso == automation_market_sim.session_date_iso %}selected{% endif %}>{{ c.label_br }}</option>
@@ -38,8 +43,8 @@
     </form>
     <script>
     (function() {
-      var symSel = document.getElementById('automation-sim-ticker');
-      var daySel = document.getElementById('automation-sim-session-date');
+      var symSel = document.getElementById('automation-replay-ticker');
+      var daySel = document.getElementById('automation-replay-session-date');
       var datesUrl = "{% url 'trader:quote_candles_session_dates_json' %}";
       if (!symSel || !daySel) return;
       function fmtBr(ymd) {
@@ -97,7 +102,7 @@
     <form method="post" action="{% url 'trader:automation_market_simulation' %}" style="margin-top:0.4rem;">
       {% csrf_token %}
       <input type="hidden" name="next" value="{{ request.path }}">
-      <button type="submit" class="btn-secondary" style="padding:0.28rem 0.55rem;font-size:0.72rem;width:100%;">Desativar</button>
+      <button type="submit" class="btn-secondary" style="padding:0.28rem 0.55rem;font-size:0.72rem;width:100%;">Desativar sessão</button>
     </form>
     <div class="sidebar-replay-slot" style="margin-top:0.5rem;">
       {% include "trader/partials/automation_replay_engine.html" %}
@@ -106,7 +111,7 @@
   </div>
   {% else %}
   <p class="automation-sim-real-only automation-sim-real-only--compact" style="margin:0;">
-    <strong>REAL:</strong> use <strong>Simulador</strong> na barra.
+    <strong>REAL:</strong> use <strong>Simulador</strong> ou <strong>Replay</strong> na barra.
   </p>
   {% endif %}
 </div>

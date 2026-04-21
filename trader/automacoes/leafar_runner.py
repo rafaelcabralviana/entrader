@@ -28,8 +28,15 @@ from trader.automacoes.execution_guard import (
     total_open_quantity_for_ticker,
     try_consume_order_slot_for_round,
 )
-from trader.automacoes.runtime import runtime_max_open_operations, runtime_max_position_units
+from trader.automacoes.runtime import (
+    runtime_max_open_operations,
+    runtime_max_position_units,
+)
 from trader.automacoes.bracket_width import apply_bracket_distance_multipliers
+from trader.automacoes.session_range_bracket import (
+    adjust_tp_sl_to_session_extremes,
+    session_high_low_from_candles,
+)
 from trader.automacoes.prefs import strategy_execute_orders_enabled, trailing_stop_adjustment_enabled
 from trader.automacoes.trend_core import classify_trend
 from trader.automacoes.universal_bracket_trailing import (
@@ -44,11 +51,21 @@ from trader.automacoes.leafar_vp import (
     detect_leafar_signal,
     volume_profile_mountains,
 )
-from trader.automacoes.leafar_candles import load_session_day_candles
+from trader.automacoes.leafar_candles import (
+    load_session_day_candles,
+    parse_replay_until_iso,
+    trim_candles_to_replay_until,
+)
 from trader.automacoes.profiles import resolve_active_profile
 from trader.automacoes.thoughts import record_automation_thought
 from trader.custody_simulator import record_bracket_execution_marker
-from trader.environment import ENV_SIMULATOR, get_current_environment, normalize_environment, order_api_mode_label
+from trader.environment import (
+    ENV_REPLAY,
+    ENV_SIMULATOR,
+    get_current_environment,
+    normalize_environment,
+    order_api_mode_label,
+)
 from trader.models import AutomationThought, AutomationTriggerMarker, Position
 from trader.trading_system.contracts.context import ObservationContext
 
@@ -76,32 +93,50 @@ def _ensure_full_day_candles(
     candles: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     """
-    Defesa final: leafaR deve sempre decidir usando VP do dia inteiro.
+    Defesa final: VP coerente com o modo (ao vivo vs replay).
+
+    No **replay** com ``replay_until``, recarrega sempre de ``QuoteSnapshot`` com
+    ``captured_at <= replay_until`` — não confiar só em ``candles_full_day`` vindo do
+    buffer (evita decisões com dados «do futuro» relativamente ao cursor).
     """
     try:
         full_day_flag = bool((ctx.extra or {}).get('candles_full_day')) if isinstance(ctx.extra, dict) else False
     except Exception:
         full_day_flag = False
-    if full_day_flag and candles:
-        return candles
     try:
         iv_raw = getattr(settings, 'TRADER_LEAFAR_INTERVAL_SEC', 10)
         iv = max(1, min(int(iv_raw), 300))
     except (TypeError, ValueError):
         iv = 10
     session_day = _session_day_from_ctx(ctx)
-    replay_until = None
     try:
-        from trader.automacoes.leafar_candles import parse_replay_until_iso
         replay_until = parse_replay_until_iso(getattr(ctx, 'replay_until_iso', None))
     except Exception:
         replay_until = None
+    data_source = getattr(ctx, 'data_source', None) or ''
+
+    if str(data_source) == 'session_replay' and replay_until is not None:
+        full = load_session_day_candles(
+            sym,
+            session_day,
+            interval_sec=iv,
+            replay_until=replay_until,
+        )
+        return full or trim_candles_to_replay_until(candles or [], replay_until)
+
+    if full_day_flag and candles:
+        if replay_until is not None:
+            return trim_candles_to_replay_until(candles, replay_until)
+        return candles
+
     full = load_session_day_candles(
         sym,
         session_day,
         interval_sec=iv,
         replay_until=replay_until,
     )
+    if replay_until is not None and full:
+        full = trim_candles_to_replay_until(full, replay_until)
     return full or candles
 
 
@@ -270,6 +305,12 @@ def _adjust_levels_to_day_volume(sig, candles: list[dict[str, Any]]) -> tuple[fl
                 stop = max(float(stop), float(lvn))
             else:
                 stop = min(float(stop), float(lvn))
+    bounds = session_high_low_from_candles(candles)
+    if bounds is not None:
+        d_hi, d_lo = bounds
+        target, stop = adjust_tp_sl_to_session_extremes(
+            side, last, target, stop, d_hi, d_lo, tick
+        )
     return target, stop
 
 
@@ -288,8 +329,17 @@ def _leafar_enabled() -> bool:
     return bool(getattr(settings, 'TRADER_LEAFAR_ENABLED', True))
 
 
-def _quantity() -> int:
-    return 2
+def _quantity(user, env: str) -> int:
+    """
+    Quantidade por entrada; limitada pelo máx. operações abertas (robô) e por ``TRADER_LEAFAR_QUANTITY``.
+    """
+    try:
+        q = int(getattr(settings, 'TRADER_LEAFAR_QUANTITY', 1))
+    except (TypeError, ValueError):
+        q = 1
+    q = max(1, q)
+    mo = runtime_max_open_operations(user, env)
+    return max(1, min(q, mo))
 
 
 def _cooldown_sec() -> int:
@@ -319,10 +369,17 @@ def _leafar_detection_kwargs() -> dict:
         'num_bins': max(8, min(64, _i('TRADER_LEAFAR_VP_BINS', 24))),
         'min_bins_from_poc': max(0, _i('TRADER_LEAFAR_MIN_BINS_FROM_POC', 1)),
         'low_corridor_ratio': max(0.05, min(0.95, _f('TRADER_LEAFAR_VP_CORRIDOR_RATIO', 0.38))),
-        'min_candles': max(15, _i('TRADER_LEAFAR_MIN_CANDLES', 28)),
+        'min_candles': max(20, _i('TRADER_LEAFAR_MIN_CANDLES', 42)),
         'trend_window': max(3, min(20, _i('TRADER_LEAFAR_TREND_WINDOW', 7))),
         'trend_min_frac': max(0.35, min(0.95, _f('TRADER_LEAFAR_TREND_MIN_FRAC', 0.48))),
         'min_price_sep_frac': max(0.0, min(0.08, _f('TRADER_LEAFAR_MIN_PRICE_SEP_FRAC', 0.006))),
+        'session_local_sep_frac': max(0.05, min(0.55, _f('TRADER_LEAFAR_SESSION_LOCAL_SEP_FRAC', 0.22))),
+        # Filtros de cautela (defaults moderados para manter frequência viável).
+        'poc_stability_bars': max(1, min(8, _i('TRADER_LEAFAR_POC_STABILITY_BARS', 2))),
+        'poc_dominance_ratio': max(1.0, min(2.2, _f('TRADER_LEAFAR_POC_DOMINANCE_RATIO', 1.08))),
+        'persistence_bars': max(1, min(8, _i('TRADER_LEAFAR_PERSISTENCE_BARS', 2))),
+        'min_recent_range_ticks': max(0, min(120, _i('TRADER_LEAFAR_MIN_RECENT_RANGE_TICKS', 8))),
+        'min_session_minutes': max(0, min(120, _i('TRADER_LEAFAR_MIN_SESSION_MINUTES', 18))),
     }
 
 
@@ -524,7 +581,7 @@ def _process_signal(
         last = float(candles[-1]['close'])
     except (TypeError, ValueError, KeyError, IndexError):
         return
-    replay_sim = (not for_live_tail) and normalize_environment(env) == ENV_SIMULATOR
+    replay_sim = (not for_live_tail) and normalize_environment(env) == ENV_REPLAY
     trail_lane = BRACKET_LANE_REPLAY_SHADOW if replay_sim else BRACKET_LANE_STANDARD
     lane = 'replay_shadow' if replay_sim else 'standard'
     if trailing_stop_adjustment_enabled(
@@ -865,7 +922,7 @@ def _process_signal(
         return
 
     slot_consumed = True
-    qty = _quantity()
+    qty = _quantity(user, env)
     sig_exec = replace(sig, take_profit=target_adj, stop_loss=stop_adj)
     api_lbl = order_api_mode_label()
     try:

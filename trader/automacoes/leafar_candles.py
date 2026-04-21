@@ -30,6 +30,56 @@ def calendar_date_brt(now: datetime | None = None) -> date:
     return now.astimezone(_TZ_SP).date()
 
 
+def _parse_candle_bucket_dt(c: dict[str, Any]) -> datetime | None:
+    """Instante de referência da vela (início de bucket) para comparação com ``replay_until``."""
+    raw = c.get('bucket_start') or c.get('label') or c.get('captured_at')
+    if raw is None:
+        return None
+    if isinstance(raw, datetime):
+        dt = raw
+    else:
+        s = str(raw).strip()
+        if not s:
+            return None
+        if s.endswith('Z'):
+            s = s[:-1] + '+00:00'
+        try:
+            dt = datetime.fromisoformat(s)
+        except ValueError:
+            return None
+    if dj_tz.is_naive(dt):
+        return dj_tz.make_aware(dt, _TZ_SP)
+    return dt.astimezone(_TZ_SP)
+
+
+def trim_candles_to_replay_until(
+    candles: list[dict[str, Any]],
+    replay_until: datetime | None,
+) -> list[dict[str, Any]]:
+    """
+    Remove velas cujo **início de bucket** é estritamente posterior a ``replay_until``.
+
+    Camada extra contra look-ahead se a lista tiver sido montada sem o filtro
+    ``captured_at__lte`` (ex.: buffer da UI). No fluxo normal do motor, a query já trunca.
+    """
+    if not candles or replay_until is None:
+        return candles
+    ru = replay_until
+    if dj_tz.is_naive(ru):
+        ru = dj_tz.make_aware(ru, _TZ_SP)
+    else:
+        ru = ru.astimezone(_TZ_SP)
+    out: list[dict[str, Any]] = []
+    for c in candles:
+        dt = _parse_candle_bucket_dt(c)
+        if dt is None:
+            out.append(c)
+            continue
+        if dt <= ru:
+            out.append(c)
+    return out
+
+
 def parse_replay_until_iso(raw: str | None) -> datetime | None:
     """ISO-8601 com fuso; naive interpretado em America/Sao_Paulo (alinhado a ``quote_candles_json``)."""
     s = (raw or '').strip()
@@ -76,7 +126,7 @@ def load_recent_candles(
     max_rows = min(20_000, max(2_000, max_rows))
 
     rows = list(
-        QuoteSnapshot.objects.filter(ticker__iexact=sym)
+        QuoteSnapshot.objects.filter(ticker=sym)
         .order_by('-captured_at')
         .values('captured_at', 'quote_data')[:max_rows]
     )
@@ -162,7 +212,7 @@ def load_session_day_candles(
     day_end = day_start + timedelta(days=1)
 
     qs = QuoteSnapshot.objects.filter(
-        ticker__iexact=sym,
+        ticker=sym,
         captured_at__gte=day_start,
         captured_at__lt=day_end,
     )

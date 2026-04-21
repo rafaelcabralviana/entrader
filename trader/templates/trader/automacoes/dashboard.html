@@ -516,11 +516,11 @@
           </label>
           <button type="submit" class="btn-secondary">Trocar</button>
         </form>
-        {% if trading_environment_is_simulator %}
+        {% if trading_environment_is_simulator or trading_environment_is_replay %}
         <form method="post" action="{% url 'trader:automation_profile_create' %}" style="display:flex;gap:0.4rem;align-items:center;flex-wrap:wrap;">
           {% csrf_token %}
           <input type="hidden" name="next" value="{{ request.get_full_path }}">
-          <input type="text" name="profile_name" placeholder="Novo perfil (simulação)" maxlength="64" required style="max-width:12rem;">
+          <input type="text" name="profile_name" placeholder="Nome do novo perfil" maxlength="64" required style="max-width:12rem;">
           <button type="submit" class="btn-secondary">Criar perfil</button>
         </form>
         {% endif %}
@@ -528,7 +528,7 @@
       <p class="hint" style="margin:0.25rem 0 0;font-size:0.74rem;">
         Perfil ativo: <strong>{{ automation_active_profile_name|default:"Tempo_Real" }}</strong>
       </p>
-      {% if trading_environment_is_simulator and replay_fiction_profile.show %}
+      {% if trading_environment_is_replay and replay_fiction_profile.show %}
       <div class="hint" style="margin:0.35rem 0 0;font-size:0.72rem;line-height:1.45;border-top:1px solid var(--border);padding-top:0.35rem;" aria-label="Totais replay fictício (ledger local)">
         <div><strong>Replay fictício · P/L não real. (abertas):</strong>
           <span class="{{ replay_fiction_profile.active_unreal_total_class }}">{{ replay_fiction_profile.active_unreal_total_str }}</span>
@@ -537,7 +537,17 @@
           <span class="{{ replay_fiction_profile.history_net_total_all_class }}">{{ replay_fiction_profile.history_net_total_all_str }}</span>
           {% if replay_fiction_profile.history_full_count %}<span class="hint"> ({{ replay_fiction_profile.history_full_count }} enc.)</span>{% endif %}
         </div>
-        <p style="margin:0.25rem 0 0;font-size:0.68rem;color:var(--muted);">Ao limpar logs neste ambiente, o histórico P/L fictício e posições replay são também apagados.</p>
+        <p style="margin:0.35rem 0 0;font-size:0.68rem;color:var(--muted);">
+          No ledger fictício, <strong>Venda</strong> (SHORT) aparece como posição aberta até a estratégia encerrar ou até limpar o ledger; não há ordem na corretora.
+        </p>
+        <p style="margin:0.25rem 0 0;font-size:0.68rem;color:var(--muted);">«Limpar logs» neste ambiente também apaga este ledger. Para só zerar posições e P/L fictícios, use o botão abaixo (logs intactos).</p>
+        {% if replay_fiction_profile.ledger_has_records %}
+        <form method="post" action="{% url 'trader:automation_replay_shadow_ledger_clear' %}" style="margin:0.4rem 0 0;display:inline-flex;gap:0.35rem;align-items:center;flex-wrap:wrap;" onsubmit="return confirm('Apagar posições abertas e o histórico de P/L do replay fictício? Os logs de automação não serão alterados.');">
+          {% csrf_token %}
+          <input type="hidden" name="next" value="{{ request.get_full_path }}">
+          <button type="submit" class="btn-secondary">Limpar ledger fictício</button>
+        </form>
+        {% endif %}
       </div>
       {% endif %}
     </div>
@@ -559,9 +569,9 @@
         <a href="{% url 'trader:automations_logs_day' %}" class="btn-secondary" style="text-decoration:none;">Histórico por dia</a>
         <form method="post" action="{% url 'trader:automation_clear_thoughts' %}" style="margin:0;">
         {% csrf_token %}
-        <input type="hidden" name="env" value="{% if trading_environment_is_real %}real{% else %}simulator{% endif %}">
+        <input type="hidden" name="env" value="{% if trading_environment_is_real %}real{% elif trading_environment_is_replay %}replay{% else %}simulator{% endif %}">
         <input type="hidden" name="next" value="{{ request.get_full_path }}">
-        <button type="submit" class="btn-secondary" onclick="return confirm('Limpar todos os logs deste ambiente?{% if trading_environment_is_simulator %} No simulador, o histórico P/L fictício (replay) e posições associadas também serão apagados.{% endif %}');">Limpar logs</button>
+        <button type="submit" class="btn-secondary" onclick="return confirm('Limpar todos os logs deste ambiente?{% if trading_environment_is_replay %} No Replay, o ledger fictício (posições/PnL) também será apagado.{% endif %}');">Limpar logs</button>
         </form>
       </span>
     </div>
@@ -936,7 +946,7 @@
   scheduleNextThoughtPoll();
 })();
 </script>
-{% if trading_environment_is_simulator and automation_market_sim.effective %}
+{% if trading_environment_is_replay and automation_market_sim.effective %}
 {% include "trader/partials/automation_replay_script.html" %}
 {% endif %}
 {% endblock %}

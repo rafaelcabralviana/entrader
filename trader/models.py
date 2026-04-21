@@ -111,6 +111,7 @@ class Position(models.Model):
     class TradingEnvironment(models.TextChoices):
         SIMULATOR = 'simulator', 'Simulador'
         REAL = 'real', 'Real'
+        REPLAY = 'replay', 'Replay'
 
     class Lane(models.TextChoices):
         """Ledger local: custódia API vs replay (preços das velas, sem corretora)."""

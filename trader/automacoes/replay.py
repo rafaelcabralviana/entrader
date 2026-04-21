@@ -4,7 +4,6 @@ Montagem de frames de replay (quote + livro alinhado no tempo) a partir de snaps
 
 from __future__ import annotations
 
-from bisect import bisect_right
 from datetime import date, datetime, timedelta, time as time_cls
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -30,9 +29,18 @@ _TZ_SP = ZoneInfo('America/Sao_Paulo')
 # Paginação: evita um único JSON gigante; livros do dia ficam em cache curto entre chunks.
 _REPLAY_BOOKS_CACHE_KEY = 'automation_replay_books:v1:{sym}:{day}'
 _REPLAY_QCOUNT_CACHE_KEY = 'automation_replay_qcount:v1:{sym}:{day}'
-_REPLAY_BOOKS_CACHE_SEC = 90
-DEFAULT_REPLAY_CHUNK = 1000
-MAX_REPLAY_CHUNK = 1000
+_REPLAY_ALIGN_OFF_CACHE_KEY = 'automation_replay_align_off:v1:{sym}:{day}:{align_key}'
+# TTL maior: replay reutiliza os mesmos dados em sequência (menos COUNT/list no BD).
+_REPLAY_BOOKS_CACHE_SEC = 300
+DEFAULT_REPLAY_CHUNK = 1500
+MAX_REPLAY_CHUNK = 2500
+
+
+def _captured_as_sp(dt: datetime) -> datetime:
+    """Normaliza instante para America/Sao_Paulo (comparação estável quote vs book)."""
+    if timezone.is_naive(dt):
+        return timezone.make_aware(dt, _TZ_SP)
+    return dt.astimezone(_TZ_SP)
 
 
 def _operation_hints(sym: str) -> dict[str, Any]:
@@ -55,7 +63,7 @@ def _books_for_replay_day(sym: str, session_day: date) -> list[dict[str, Any]]:
     day_end = day_start + timedelta(days=1)
     books = list(
         BookSnapshot.objects.filter(
-            ticker__iexact=sym,
+            ticker=sym,
             captured_at__gte=day_start,
             captured_at__lt=day_end,
         )
@@ -75,7 +83,7 @@ def _quote_rows_for_day_cached(sym: str, session_day: date) -> int:
     day_end = day_start + timedelta(days=1)
     n = int(
         QuoteSnapshot.objects.filter(
-            ticker__iexact=sym,
+            ticker=sym,
             captured_at__gte=day_start,
             captured_at__lt=day_end,
         ).count()
@@ -89,17 +97,26 @@ def _frames_from_quotes(
     quotes_slice: list[dict[str, Any]],
     books: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    book_times = [b['captured_at'] for b in books]
+    """
+    Alinha cada quote ao último book com ``captured_at`` <= instante da cotação.
+
+    Quotes e books vêm ordenados por ``captured_at``; percorre com um único índice no
+    livro (O(n+m)) em vez de ``bisect`` por frame (O(n log m)).
+    """
     hints = _operation_hints(sym)
+    hints_json = json_sanitize(hints)
+    norm_book_ts = [_captured_as_sp(b['captured_at']) for b in books]
+    n_books = len(books)
+    book_idx = -1
     frames: list[dict[str, Any]] = []
     for q in quotes_slice:
-        qdt = q['captured_at']
-        if timezone.is_naive(qdt):
-            qdt = timezone.make_aware(qdt, _TZ_SP)
-        idx = bisect_right(book_times, qdt) - 1
+        q_raw = q['captured_at']
+        qdt = _captured_as_sp(q_raw)
+        while book_idx + 1 < n_books and norm_book_ts[book_idx + 1] <= qdt:
+            book_idx += 1
         book_raw: dict[str, Any] = {}
-        if idx >= 0:
-            bd = books[idx].get('book_data')
+        if book_idx >= 0:
+            bd = books[book_idx].get('book_data')
             if isinstance(bd, dict):
                 book_raw = bd
         raw_bids = book_raw.get('bids') or book_raw.get('Bids') or []
@@ -123,7 +140,7 @@ def _frames_from_quotes(
                 else None,
                 'errors': {},
                 'details': None,
-                'operation_hints': json_sanitize(hints),
+                'operation_hints': hints_json,
                 'chart_payload': json_sanitize(ohlc_bar_chart_payload(quote)),
                 'live_poll_active': True,
             }
@@ -153,15 +170,23 @@ def _snapshot_offset_before_time(sym: str, session_day: date, align_dt: datetime
     """Quantos QuoteSnapshot existem antes de ``align_dt`` no dia (índice global do 1º snapshot ≥ instante do candle)."""
     day_start = datetime.combine(session_day, time_cls.min, tzinfo=_TZ_SP)
     day_end = day_start + timedelta(days=1)
-    if align_dt < day_start or align_dt >= day_end:
+    adt = _captured_as_sp(align_dt)
+    if adt < day_start or adt >= day_end:
         return 0
-    return int(
+    align_key = adt.isoformat(timespec='microseconds')
+    ck = _REPLAY_ALIGN_OFF_CACHE_KEY.format(sym=sym, day=session_day.isoformat(), align_key=align_key)
+    hit = cache.get(ck)
+    if isinstance(hit, int) and hit >= 0:
+        return hit
+    n = int(
         QuoteSnapshot.objects.filter(
-            ticker__iexact=sym,
+            ticker=sym,
             captured_at__gte=day_start,
-            captured_at__lt=align_dt,
+            captured_at__lt=adt,
         ).count()
     )
+    cache.set(ck, n, timeout=_REPLAY_BOOKS_CACHE_SEC)
+    return n
 
 
 def build_replay_frames_page(
@@ -211,7 +236,7 @@ def build_replay_frames_page(
     end = min(offset + limit, cap)
     quotes_slice = list(
         QuoteSnapshot.objects.filter(
-            ticker__iexact=sym,
+            ticker=sym,
             captured_at__gte=day_start,
             captured_at__lt=day_end,
         )

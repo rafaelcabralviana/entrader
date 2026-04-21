@@ -21,10 +21,14 @@ from django.core.cache import cache
 from django.utils import timezone as dj_tz
 
 from trader.automacoes.bracket_width import (
+    trailing_breakeven_arm_ticks,
+    trailing_breakeven_offset_ticks,
     trailing_lock_profit_arm_pct,
     trailing_lock_profit_floor_pct,
     trailing_min_favorable_ticks,
     trailing_protective_floor_ticks,
+    trailing_relax_max_ticks,
+    trailing_relax_pullback_ticks,
     trailing_stop_tick_steps,
     trailing_tp_peak_follow_ticks,
 )
@@ -39,6 +43,7 @@ from trader.services.orders import (
     post_send_market_order,
     post_send_stop_limit_order,
 )
+from trader.services.operations_history import register_trade_execution
 
 logger = logging.getLogger(__name__)
 
@@ -254,6 +259,64 @@ def _force_close_daytrade_if_needed(
     )
 
 
+def _close_replay_shadow_if_price_hit(
+    *,
+    sym: str,
+    st: dict[str, Any],
+    last_price: float,
+    qty: int,
+    src: str,
+) -> str | None:
+    """
+    No replay_shadow não há corretora para executar TP/SL; fecha no ledger quando preço toca níveis.
+    """
+    if st.get('closed_reason'):
+        return None
+    entry_side = str(st.get('entry_side') or '').strip()
+    exit_side = str(st.get('exit_side') or '').strip()
+    if entry_side not in ('Buy', 'Sell') or exit_side not in ('Buy', 'Sell'):
+        return None
+    tp = _float_state(st, 'tp_price', 0.0)
+    sl = _float_state(st, 'sl_trigger', 0.0)
+    hit_reason = ''
+    hit_px = 0.0
+    if entry_side == 'Buy' and exit_side == 'Sell':
+        if tp > 0 and float(last_price) >= tp - 1e-12:
+            hit_reason = 'tp'
+            hit_px = tp
+        elif sl > 0 and float(last_price) <= sl + 1e-12:
+            hit_reason = 'sl'
+            hit_px = sl
+    elif entry_side == 'Sell' and exit_side == 'Buy':
+        if tp > 0 and float(last_price) <= tp + 1e-12:
+            hit_reason = 'tp'
+            hit_px = tp
+        elif sl > 0 and float(last_price) >= sl - 1e-12:
+            hit_reason = 'sl'
+            hit_px = sl
+    if not hit_reason:
+        return None
+    register_trade_execution(
+        ticker=sym,
+        side=exit_side,
+        quantity=qty,
+        price=_round_px(hit_px if hit_px > 0 else float(last_price)),
+        source=f'trailing_replay_{hit_reason}',
+        trading_environment=Position.TradingEnvironment.REPLAY,
+        position_lane=Position.Lane.REPLAY_SHADOW,
+    )
+    st['closed_reason'] = f'replay_{hit_reason}'
+    st['closed_price'] = _round_px(hit_px if hit_px > 0 else float(last_price))
+    st['tp_order_id'] = None
+    st['sl_order_id'] = None
+    st['close_market_order_id'] = f'replay-shadow:auto-{hit_reason}'
+    st['closed_at_iso'] = dj_tz.now().isoformat()
+    return (
+        f'{src}: replay fechou por {"TP" if hit_reason == "tp" else "SL"} '
+        f'em {_round_px(st["closed_price"])}.'
+    )
+
+
 def try_trailing_stop_update(
     ticker: str,
     last_price: float,
@@ -310,6 +373,22 @@ def try_trailing_stop_update(
         if bootstrap_msgs:
             return ' | '.join([*bootstrap_msgs, forced_msg])
         return forced_msg
+    if shadow:
+        try:
+            hit_msg = _close_replay_shadow_if_price_hit(
+                sym=sym,
+                st=st,
+                last_price=last_price,
+                qty=qty,
+                src=src,
+            )
+            if hit_msg:
+                cache.delete(key)
+                if bootstrap_msgs:
+                    return ' | '.join([*bootstrap_msgs, hit_msg])
+                return hit_msg
+        except Exception as exc:
+            logger.warning('universal_bracket_trailing replay close %s', exc)
     oid = st.get('sl_order_id')
     if not oid:
         cache.set(key, json.dumps(st), timeout=6 * 3600)
@@ -330,6 +409,10 @@ def try_trailing_stop_update(
     arm_pct = trailing_lock_profit_arm_pct()
     lock_floor_pct = trailing_lock_profit_floor_pct()
     tp_follow = trailing_tp_peak_follow_ticks()
+    be_arm_ticks = trailing_breakeven_arm_ticks()
+    be_offset_ticks = trailing_breakeven_offset_ticks()
+    relax_pullback_ticks = trailing_relax_pullback_ticks()
+    relax_max_ticks = trailing_relax_max_ticks()
     messages: list[str] = list(bootstrap_msgs)
 
     def _persist() -> None:
@@ -340,23 +423,40 @@ def try_trailing_stop_update(
         if entry_side == 'Buy' and exit_side == 'Sell':
             peak = max(_float_state(st, 'peak', last_price), last_price)
             st['peak'] = peak
-            new_trig = max(old_trig, peak - step)
+            new_trig = peak - step
             fl = trailing_protective_floor_ticks()
-            if fl > 0:
+            favorable_ticks = max(0.0, (peak - entry_ref) / max(tick, 1e-12))
+            be_armed = be_arm_ticks > 0 and favorable_ticks >= float(be_arm_ticks) - 1e-12
+            be_floor = None
+            if fl > 0 and not be_armed:
                 cap_trig = entry_ref - tick * float(fl)
                 new_trig = min(new_trig, cap_trig)
+            if be_armed:
+                be_floor = entry_ref + tick * float(max(0, be_offset_ticks))
+                new_trig = max(new_trig, be_floor)
             if arm_pct > 1e-15 and lock_floor_pct > 1e-15:
                 favorable = (peak - entry_ref) / max(entry_ref, 1e-12)
                 if favorable >= arm_pct - 1e-12:
                     lock_px = entry_ref * (1.0 + lock_floor_pct)
                     new_trig = max(new_trig, lock_px)
-            new_ord = max(old_ord, new_trig - tick * 2)
-            sl_changed = new_trig > old_trig + tick * 0.5
+            if relax_pullback_ticks > 0 and relax_max_ticks > 0:
+                pullback = peak - float(last_price)
+                if pullback >= tick * float(relax_pullback_ticks) - 1e-12:
+                    min_allowed = old_trig - tick * float(relax_max_ticks)
+                    if new_trig < min_allowed:
+                        new_trig = min_allowed
+            # Depois de armar break-even, não deixa o relaxamento devolver SL para baixo da entrada+offset.
+            if be_floor is not None:
+                new_trig = max(new_trig, float(be_floor))
+            new_ord = new_trig - tick * 2
+            sl_changed = abs(new_trig - old_trig) > tick * 0.5
             if sl_changed:
                 if shadow:
                     st['sl_trigger'] = new_trig
                     st['sl_order_price'] = new_ord
-                    messages.append(f'{src}: trailing SL (compra, replay) gatilho→{_round_px(new_trig)}.')
+                    messages.append(
+                        f'{src}: trailing SL (compra, replay) gatilho→{_round_px(new_trig)}.'
+                    )
                 else:
                     body = {
                         'Quantity': qty,
@@ -398,18 +498,33 @@ def try_trailing_stop_update(
         if entry_side == 'Sell' and exit_side == 'Buy':
             trough = min(_float_state(st, 'trough', last_price), last_price)
             st['trough'] = trough
-            new_trig = min(old_trig, trough + step)
+            new_trig = trough + step
             fl = trailing_protective_floor_ticks()
-            if fl > 0:
+            favorable_ticks = max(0.0, (entry_ref - trough) / max(tick, 1e-12))
+            be_armed = be_arm_ticks > 0 and favorable_ticks >= float(be_arm_ticks) - 1e-12
+            be_ceiling = None
+            if fl > 0 and not be_armed:
                 floor_trig = entry_ref + tick * float(fl)
                 new_trig = max(new_trig, floor_trig)
+            if be_armed:
+                be_ceiling = entry_ref - tick * float(max(0, be_offset_ticks))
+                new_trig = min(new_trig, be_ceiling)
             if arm_pct > 1e-15 and lock_floor_pct > 1e-15:
                 favorable = (entry_ref - trough) / max(entry_ref, 1e-12)
                 if favorable >= arm_pct - 1e-12:
                     lock_px = entry_ref * (1.0 - lock_floor_pct)
                     new_trig = min(new_trig, lock_px)
-            new_ord = min(old_ord, new_trig + tick * 2)
-            sl_changed = new_trig < old_trig - tick * 0.5
+            if relax_pullback_ticks > 0 and relax_max_ticks > 0:
+                pullback = float(last_price) - trough
+                if pullback >= tick * float(relax_pullback_ticks) - 1e-12:
+                    max_allowed = old_trig + tick * float(relax_max_ticks)
+                    if new_trig > max_allowed:
+                        new_trig = max_allowed
+            # Depois de armar break-even, não deixa o relaxamento devolver SL para cima da entrada-offset.
+            if be_ceiling is not None:
+                new_trig = min(new_trig, float(be_ceiling))
+            new_ord = new_trig + tick * 2
+            sl_changed = abs(new_trig - old_trig) > tick * 0.5
             if sl_changed:
                 if shadow:
                     st['sl_trigger'] = new_trig

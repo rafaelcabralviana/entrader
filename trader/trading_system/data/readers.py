@@ -13,8 +13,9 @@ def latest_quote_snapshot(ticker: str) -> Optional['QuoteSnapshot']:
     if not sym:
         return None
     return (
-        QuoteSnapshot.objects.filter(ticker__iexact=sym)
+        QuoteSnapshot.objects.filter(ticker=sym)
         .order_by('-captured_at')
+        .only('captured_at', 'quote_data', 'quote_event_at', 'latency_ms', 'ticker', 'id')
         .first()
     )
 
@@ -26,8 +27,9 @@ def latest_book_snapshot(ticker: str) -> Optional['BookSnapshot']:
     if not sym:
         return None
     return (
-        BookSnapshot.objects.filter(ticker__iexact=sym)
+        BookSnapshot.objects.filter(ticker=sym)
         .order_by('-captured_at')
+        .only('captured_at', 'book_data', 'ticker', 'id')
         .first()
     )
 

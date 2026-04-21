@@ -21,9 +21,11 @@ from django.core.cache import cache
 from django.db.models import Q
 from django.utils import timezone as dj_tz
 
-from trader.automacoes.leafar_candles import load_session_day_candles
+from trader.automacoes.leafar_candles import load_session_day_candles, trim_candles_to_replay_until
 from trader.automacoes.observer import run_strategy_observers
+from trader.automacoes.prefs import is_strategy_enabled
 from trader.automacoes.profiles import resolve_active_profile
+from trader.automacoes.execution_guard import has_open_position_for_ticker
 from trader.automacoes.runtime import runtime_enabled, runtime_enabled_map
 from trader.automacoes.strategies import (
     AUTOMATION_STRATEGY_KEYS,
@@ -32,7 +34,8 @@ from trader.automacoes.strategies import (
 )
 from trader.automacoes.strategy_registry import get_celery_tick
 from trader.automacoes.thoughts import record_automation_thought
-from trader.environment import ENV_REAL, ENV_SIMULATOR, normalize_environment, set_current_environment
+from trader.environment import ENV_REAL, ENV_REPLAY, ENV_SIMULATOR, normalize_environment, set_current_environment
+from trader.panel_context import quote_live_allows_automation_orders
 from trader.models import (
     AutomationExecutionProfile,
     AutomationMarketSimPreference,
@@ -119,12 +122,12 @@ def _enabled_strategies_by_env_user() -> dict[str, dict[int, dict[str, Any]]]:
     rows = AutomationStrategyToggle.objects.filter(
         enabled=True,
         strategy_key__in=AUTOMATION_STRATEGY_KEYS,
-        trading_environment__in=(ENV_SIMULATOR, ENV_REAL),
+        trading_environment__in=(ENV_SIMULATOR, ENV_REAL, ENV_REPLAY),
     ).filter(
         Q(execution_profile__isnull=True) | Q(execution_profile__is_active=True)
     ).select_related('execution_profile')
     out: dict[str, dict[int, dict[str, Any]]] = defaultdict(dict)
-    for row in rows:
+    for row in rows.iterator(chunk_size=256):
         uid = int(getattr(row, 'user_id', 0) or 0)
         env = getattr(row, 'trading_environment', '')
         sk = getattr(row, 'strategy_key', '')
@@ -139,7 +142,29 @@ def _enabled_strategies_by_env_user() -> dict[str, dict[int, dict[str, Any]]]:
             slot['profile'] = getattr(row, 'execution_profile')
         if sk not in slot['keys']:
             slot['keys'].append(sk)
-    return {env: users for env, users in out.items()}
+    merged: dict[str, dict[int, dict[str, Any]]] = {env: users for env, users in out.items()}
+    # Replay possui estado próprio; se o utilizador não tiver toggles em replay,
+    # mantém fallback ao simulador para retrocompatibilidade.
+    sim_users = dict(merged.get(ENV_SIMULATOR) or {})
+    replay_users = dict(merged.get(ENV_REPLAY) or {})
+    replay_slots: dict[int, dict[str, Any]] = {}
+    replay_uids = set(replay_users.keys()) | set(sim_users.keys())
+    for uid in replay_uids:
+        slot_replay = replay_users.get(uid) or {}
+        keys_replay = list(slot_replay.get('keys') or [])
+        if keys_replay:
+            replay_slots[uid] = {
+                'keys': keys_replay,
+                'profile': slot_replay.get('profile'),
+            }
+            continue
+        slot_sim = sim_users.get(uid) or {}
+        keys_sim = list(slot_sim.get('keys') or [])
+        if keys_sim:
+            replay_slots[uid] = {'keys': keys_sim, 'profile': None}
+    if replay_slots:
+        merged[ENV_REPLAY] = replay_slots
+    return merged
 
 
 def _sim_prefs_map(user_ids: list[int], env: str) -> dict[int, AutomationMarketSimPreference]:
@@ -174,14 +199,19 @@ def _last_quote_snapshot_row_session(
     tz = ZoneInfo('America/Sao_Paulo')
     day_start = datetime.combine(session_day, dtime.min, tzinfo=tz)
     day_end = day_start + timedelta(days=1)
+    sym = (ticker or '').strip().upper()
     qs = QuoteSnapshot.objects.filter(
-        ticker__iexact=(ticker or '').strip().upper(),
+        ticker=sym,
         captured_at__gte=day_start,
         captured_at__lt=day_end,
     )
     if replay_until is not None:
         qs = qs.filter(captured_at__lte=replay_until)
-    return qs.order_by('-captured_at').first()
+    return (
+        qs.order_by('-captured_at')
+        .only('captured_at', 'quote_data', 'quote_event_at', 'latency_ms', 'ticker', 'id')
+        .first()
+    )
 
 
 def _build_live_context(
@@ -461,6 +491,9 @@ def _dispatch_strategies_for_context(
     """
     Em cada chamada (cada rodada do Celery após novos snapshots), corre ``evaluate``
     e depois os ``celery_tick`` — cada estratégia usa aproximações nos seus próprios limiares.
+
+    Estratégias com :func:`~trader.automacoes.prefs.is_strategy_enabled` falso para o
+    utilizador/ambiente/perfil são omitidas (silêncio: sem observer nem tick).
     """
     if not keys:
         return
@@ -472,25 +505,87 @@ def _dispatch_strategies_for_context(
         # Modo estrito no ao vivo: só processa o ticker explicitamente selecionado.
         if not target or not current or current != target:
             return
+    keys_run = list(keys)
+    pause_passive = bool(getattr(settings, 'TRADER_PASSIVE_PAUSE_WHEN_OPEN_POSITION', False))
+    if pause_passive:
+        lane = 'replay_shadow' if (env == ENV_REPLAY and ctx.data_source == 'session_replay') else 'standard'
+        sym = (ctx.ticker or '').strip().upper()
+        has_open = bool(sym) and has_open_position_for_ticker(sym, position_lane=lane)
+        if has_open:
+            keys_run = [k for k in keys if not is_passive_strategy(k)]
+            if len(keys_run) != len(keys):
+                uid = int(getattr(user, 'id', 0) or 0)
+                ck = f'automation:passive_pause:open:{uid}:{env}:{sym}:{lane}'
+                if cache.add(ck, '1', timeout=120):
+                    try:
+                        record_automation_thought(
+                            user,
+                            env,
+                            (
+                                f'Estratégias passivas pausadas em [{sym}] enquanto houver operação aberta '
+                                f'({lane}). Reativação automática após liquidação.'
+                            )[:3900],
+                            source='passive_pause_global',
+                            kind=AutomationThought.Kind.NOTICE,
+                            execution_profile=execution_profile,
+                        )
+                    except Exception:
+                        logger.exception('automation_engine passive global pause thought')
+        else:
+            uid = int(getattr(user, 'id', 0) or 0)
+            ck = f'automation:passive_pause:open:{uid}:{env}:{sym}:{lane}'
+            if cache.get(ck):
+                cache.delete(ck)
+                rk = f'automation:passive_pause:resume:{uid}:{env}:{sym}:{lane}'
+                if cache.add(rk, '1', timeout=120):
+                    try:
+                        record_automation_thought(
+                            user,
+                            env,
+                            (
+                                f'Estratégias passivas reativadas em [{sym}] após liquidação '
+                                f'da posição ({lane}).'
+                            )[:3900],
+                            source='passive_pause_global',
+                            kind=AutomationThought.Kind.NOTICE,
+                            execution_profile=execution_profile,
+                        )
+                    except Exception:
+                        logger.exception('automation_engine passive global resume thought')
+    if not keys_run:
+        return
+    # Toggle efetivo (prefs + armazenamento replay/simulador): se desligado, não corre
+    # evaluate/observer nem celery_tick — evita WARN “estratégia desligada” e ruído no painel.
+    _prof = execution_profile or (
+        resolve_active_profile(user, env) if user is not None else None
+    )
+    keys_run = [
+        k
+        for k in keys_run
+        if user is None
+        or is_strategy_enabled(user, k, env, execution_profile=_prof)
+    ]
+    if not keys_run:
+        return
     _record_strategy_observer_thoughts(
         user,
         env,
         ctx,
-        keys,
+        keys_run,
         execution_profile=execution_profile,
     )
     passive_ctx = _passive_context_from_logs(
         user,
         env,
         ctx,
-        keys,
+        keys_run,
         execution_profile=execution_profile,
     )
     if isinstance(ctx.extra, dict):
         ctx.extra['passive_context'] = passive_ctx
     else:
         ctx.extra = {'passive_context': passive_ctx}
-    for sk in keys:
+    for sk in keys_run:
         tick = get_celery_tick(sk)
         if tick is None:
             continue
@@ -513,6 +608,30 @@ def _dispatch_strategies_for_context(
                 except Exception:
                     logger.exception('automation_engine passive guard thought')
             continue
+        if ctx.data_source == 'live_tail' and not quote_live_allows_automation_orders(
+            ctx.quote
+        ) and not is_passive_strategy(sk):
+            uid = int(getattr(user, 'id', 0) or 0)
+            sym_u = (ctx.ticker or '').strip().upper() or '—'
+            k = f'automation:live_mkt:block:{uid}:{env}:{sym_u}:{sk}'
+            if cache.add(k, '1', timeout=900):
+                try:
+                    q = ctx.quote if isinstance(ctx.quote, dict) else {}
+                    st = q.get('status') or q.get('Status') or '—'
+                    record_automation_thought(
+                        user,
+                        env,
+                        (
+                            f'Execução ativa em pausa: mercado fora de negociação contínua '
+                            f'(status={st!s}) [{sk}].'
+                        )[:3900],
+                        source='market_session',
+                        kind=AutomationThought.Kind.NOTICE,
+                        execution_profile=execution_profile,
+                    )
+                except Exception:
+                    logger.exception('automation_engine live market session thought')
+            continue
         try:
             tick(ctx, user, env)
         except Exception:
@@ -525,7 +644,8 @@ def run_automation_session_replay_now(
     session_day: date,
     sim_ticker: str,
     replay_until: datetime | None,
-    trading_environment: str = ENV_SIMULATOR,
+    trading_environment: str = ENV_REPLAY,
+    force: bool = False,
 ) -> None:
     """
     Avalia estratégias no instante ``replay_until`` da simulação (mesmo critério do gráfico).
@@ -535,9 +655,12 @@ def run_automation_session_replay_now(
 
     Executa o mesmo pipeline do worker (``evaluate`` + ``celery_tick``) para manter o
     comportamento consistente entre replay manual (scrubber) e ciclo normal do Celery.
+
+    ``force=True`` ignora o guard monotónico do cursor em perfil de simulação (útil para
+    reprocessar instantes em ordem, ex.: stream de replay no servidor).
     """
     env = normalize_environment(trading_environment)
-    if env != ENV_SIMULATOR:
+    if env != ENV_REPLAY:
         return
     uid = int(getattr(user, 'id', 0) or 0)
     if not uid:
@@ -569,13 +692,14 @@ def run_automation_session_replay_now(
     if profile is not None and profile.mode == AutomationExecutionProfile.Mode.SIMULATION:
         if profile.execution_started_at is None:
             return
-        last_cursor = profile.last_runtime_cursor_at
-        if isinstance(cache_cursor, datetime):
-            if last_cursor is None or cache_cursor > last_cursor:
-                last_cursor = cache_cursor
-        if replay_until is not None and last_cursor is not None:
-            if replay_until <= last_cursor:
-                return
+        if not force:
+            last_cursor = profile.last_runtime_cursor_at
+            if isinstance(cache_cursor, datetime):
+                if last_cursor is None or cache_cursor > last_cursor:
+                    last_cursor = cache_cursor
+            if replay_until is not None and last_cursor is not None:
+                if replay_until <= last_cursor:
+                    return
     set_current_environment(env)
     interval_sec = _interval_sec_from_settings()
     candles = load_session_day_candles(
@@ -584,6 +708,8 @@ def run_automation_session_replay_now(
         interval_sec=interval_sec,
         replay_until=replay_until,
     )
+    if replay_until is not None:
+        candles = trim_candles_to_replay_until(candles, replay_until)
     ctx = _build_session_replay_context(sym, env, session_day, replay_until, candles)
     _dispatch_strategies_for_context(user, env, ctx, keys, execution_profile=profile)
     if replay_until is not None:
@@ -629,14 +755,23 @@ def run_automation_after_quote_collect(
             continue
         prefs = _sim_prefs_map(uids, env)
 
-        users_sim = [
+        users_sim_day = [
             users[uid]
             for uid in uids
             if uid in users and env == ENV_SIMULATOR and _sim_pref_active(prefs.get(uid))
         ]
-        users_live = [users[uid] for uid in uids if uid in users and users[uid] not in users_sim]
+        users_replay_day = [
+            users[uid]
+            for uid in uids
+            if uid in users and env == ENV_REPLAY and _sim_pref_active(prefs.get(uid))
+        ]
+        users_live = [
+            users[uid]
+            for uid in uids
+            if uid in users and users[uid] not in users_sim_day and users[uid] not in users_replay_day
+        ]
 
-        for u in users_sim:
+        for u in users_sim_day:
             slot = user_to_keys.get(u.id, {}) or {}
             keys = list(slot.get('keys') or [])
             profile = slot.get('profile') or resolve_active_profile(u, env)
@@ -648,12 +783,36 @@ def run_automation_after_quote_collect(
             p = prefs[u.id]
             sd: date = p.session_date  # type: ignore[assignment]
             sym = (p.sim_ticker or '').strip().upper()
+            # Simulador: dia histórico sempre até ao fim dos dados locais (replay só no ambiente Replay).
+            candles = load_session_day_candles(
+                sym,
+                sd,
+                interval_sec=iv,
+                replay_until=None,
+            )
+            ctx = _build_session_replay_context(sym, env, sd, None, candles)
+            _dispatch_strategies_for_context(u, env, ctx, keys, execution_profile=profile)
+
+        for u in users_replay_day:
+            slot = user_to_keys.get(u.id, {}) or {}
+            keys = list(slot.get('keys') or [])
+            profile = slot.get('profile') or resolve_active_profile(u, env)
+            if not keys:
+                continue
+            if profile is not None and profile.mode == AutomationExecutionProfile.Mode.SIMULATION:
+                if profile.execution_started_at is None:
+                    continue
+            p = prefs[u.id]
+            sd = p.session_date  # type: ignore[assignment]
+            sym = (p.sim_ticker or '').strip().upper()
             candles = load_session_day_candles(
                 sym,
                 sd,
                 interval_sec=iv,
                 replay_until=p.replay_until,
             )
+            if p.replay_until is not None:
+                candles = trim_candles_to_replay_until(candles, p.replay_until)
             ctx = _build_session_replay_context(sym, env, sd, p.replay_until, candles)
             _dispatch_strategies_for_context(u, env, ctx, keys, execution_profile=profile)
 

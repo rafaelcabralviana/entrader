@@ -19,7 +19,7 @@
     <a href="{% url 'trader:liquidation_history' %}" class="btn-cancel-order" style="margin-left:.5rem; text-decoration:none;">Ver histórico</a>
     {% endwith %}
   </div>
-  {% if trading_environment_is_simulator and replay_shadow_custody_panel.show %}
+  {% if trading_environment_is_replay and replay_shadow_custody_panel.show %}
   <style>
     .custody-dual { margin-top: 0.45rem; }
     .custody-dual__radios { position: absolute; opacity: 0; width: 0; height: 0; pointer-events: none; }
@@ -74,6 +74,13 @@
         <button type="button" class="btn-cancel-order" id="custody-replay-pnl-history-open">Histórico P/L (replay)</button>
         {% if not replay_shadow_custody_panel.empty_history %}
         <span class="api-data-card__meta" style="font-size:0.68rem;">{{ replay_shadow_custody_panel.history_full_count }} encerrada(s) no total</span>
+        {% endif %}
+        {% if replay_shadow_custody_panel.ledger_has_records %}
+        <form method="post" action="{% url 'trader:automation_replay_shadow_ledger_clear' %}" style="display:inline;margin:0;" onsubmit="return confirm('Apagar posições abertas e o histórico de P/L do replay fictício? Os logs de automação não serão alterados.');">
+          {% csrf_token %}
+          <input type="hidden" name="next" value="{{ request.get_full_path }}">
+          <button type="submit" class="btn-cancel-order">Limpar ledger fictício</button>
+        </form>
         {% endif %}
       </div>
       {% if replay_shadow_custody_panel.active_unreal_total_show %}

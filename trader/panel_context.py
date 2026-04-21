@@ -22,6 +22,7 @@ from api_auth.exceptions import SmartTraderConfigurationError, SmartTraderSignat
 
 from trader.environment import (
     ENV_REAL,
+    ENV_REPLAY,
     ENV_SIMULATOR,
     environment_label,
     get_current_environment,
@@ -331,6 +332,32 @@ def quote_status_is_end_of_day(quote: Any) -> bool:
         return False
     norm = str(s).strip().lower().replace('_', '')
     return norm == 'endofday'
+
+
+def quote_live_allows_automation_orders(quote: Any) -> bool:
+    """
+    Para **ao vivo** (dados da corretora): permite envio automático só no estado de negociação contínua.
+
+    - ``EndOfDay`` / equivalentes → False.
+    - ``status`` ausente ou vazio → True (compat.: snapshots antigos sem campo).
+    - ``Trading`` (qualquer capitalização) → True.
+    - Qualquer outro estado explícito (pré/pós-pregão, leilão, suspenso, etc.) → False.
+
+    Replay/simulação de dia histórico **não** usa esta função no motor (outro ``data_source``).
+    """
+    if not quote or not isinstance(quote, dict):
+        return True
+    if quote_status_is_end_of_day(quote):
+        return False
+    s = quote.get('status')
+    if s is None:
+        s = quote.get('Status')
+    if s is None or str(s).strip() == '':
+        return True
+    norm = str(s).strip().lower().replace('_', '')
+    if norm == 'trading':
+        return True
+    return False
 
 
 def json_sanitize(obj: Any) -> Any:
@@ -1413,27 +1440,35 @@ def _replay_shadow_custody_panel(request: Any | None = None) -> dict[str, Any]:
     Ledger ``replay_shadow``: posições abertas com preço de mercado alinhado ao replay
     (``AutomationMarketSimPreference.replay_until``) e histórico de PnL de posições encerradas.
     """
-    if get_current_environment() != ENV_SIMULATOR:
-        return {
-            'show': False,
-            'active_rows': [],
-            'history_rows': [],
-            'empty_active': True,
-            'empty_history': True,
-            'active_unreal_total_show': False,
-            'active_unreal_total_str': '—',
-            'active_unreal_total_class': '',
-            'history_net_total_all_str': '—',
-            'history_net_total_all_class': '',
-            'history_full_count': 0,
-        }
+    _empty_replay_panel: dict[str, Any] = {
+        'show': False,
+        'active_rows': [],
+        'history_rows': [],
+        'empty_active': True,
+        'empty_history': True,
+        'ledger_has_records': False,
+        'active_unreal_total_show': False,
+        'active_unreal_total_str': '—',
+        'active_unreal_total_class': '',
+        'history_net_total_all_str': '—',
+        'history_net_total_all_class': '',
+        'history_full_count': 0,
+    }
+    sess_replay = False
+    if request is not None:
+        try:
+            sess_replay = get_session_environment(request) == ENV_REPLAY
+        except Exception:
+            sess_replay = False
+    if not sess_replay and get_current_environment() != ENV_REPLAY:
+        return _empty_replay_panel
     from trader.models import ClosedOperation, Position
 
     until = _replay_shadow_sim_replay_until(request)
     price_q = Decimal('0.000001')
 
     active_base_qs = Position.objects.filter(
-        trading_environment=ENV_SIMULATOR,
+        trading_environment=ENV_REPLAY,
         position_lane=Position.Lane.REPLAY_SHADOW,
         is_active=True,
     )
@@ -1485,7 +1520,7 @@ def _replay_shadow_custody_panel(request: Any | None = None) -> dict[str, Any]:
         )
 
     hist_co_qs = ClosedOperation.objects.filter(
-        position__trading_environment=ENV_SIMULATOR,
+        position__trading_environment=ENV_REPLAY,
         position__position_lane=Position.Lane.REPLAY_SHADOW,
         position__is_active=False,
     )
@@ -1509,12 +1544,16 @@ def _replay_shadow_custody_panel(request: Any | None = None) -> dict[str, Any]:
             }
         )
 
+    empty_active = len(active_rows) == 0
+    empty_history = len(history_rows) == 0
+    ledger_has_records = (not empty_active) or (history_full_count > 0)
     return {
         'show': True,
         'active_rows': active_rows,
         'history_rows': history_rows,
-        'empty_active': len(active_rows) == 0,
-        'empty_history': len(history_rows) == 0,
+        'empty_active': empty_active,
+        'empty_history': empty_history,
+        'ledger_has_records': ledger_has_records,
         'active_unreal_total_show': active_unreal_n > 0,
         'active_unreal_total_str': _fmt_money_brl_simple(active_unreal_sum)
         if active_unreal_n

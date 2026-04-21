@@ -11,7 +11,11 @@ from django.utils import timezone
 from trader.models import WatchedTicker
 from trader.panel_context import quote_status_is_end_of_day
 from trader.services.marketdata import fetch_quote, fetch_book
-from trader.services.quote_history import save_quote_snapshot, save_book_snapshot
+from trader.services.quote_history import (
+    brt_save_window_allows_now,
+    save_book_snapshot,
+    save_quote_snapshot,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -327,6 +331,16 @@ def collect_watch_quotes() -> dict:
                 'errors': [],
             }
 
+    # Seg–sex, 9h–19h BRT: não chama API nem grava fora da janela (gravação também bloqueada em ``save_*``).
+    if not brt_save_window_allows_now():
+        return {
+            'ok': True,
+            'enabled': True,
+            'saved': 0,
+            'outside_brt_save_window': True,
+            'errors': [],
+        }
+
     # Evita sobreposição de execuções quando o beat agenda mais rápido
     # que o tempo real da rodada (principal causa de 429 em rajadas).
     lock_ttl = max(3, _safe_int_setting('TRADER_WATCH_TASK_LOCK_SEC', 6))
@@ -417,3 +431,35 @@ def collect_watch_quotes() -> dict:
         return result
     finally:
         _watch_release_lock()
+
+
+@shared_task
+def stream_replay_ticks_task(
+    user_id: int,
+    ticker: str,
+    session_date_iso: str,
+    pace_sec: float = 1.0,
+    max_snapshots: int | None = None,
+) -> dict:
+    """
+    Simula a chegada ordenada de cotações (``QuoteSnapshot``) do dia, disparando o mesmo
+    pipeline de estratégias que o replay por instante (``run_automation_session_replay_now``).
+
+    ``session_date_iso``: ``YYYY-MM-DD`` (prefixo de ISO aceite).
+    """
+    from datetime import date as date_cls
+
+    from trader.services.replay_stream_motor import stream_session_replay_ticks
+
+    raw = (session_date_iso or '').strip()[:10]
+    try:
+        sd = date_cls.fromisoformat(raw)
+    except ValueError:
+        return {'ok': False, 'error': 'invalid_session_date', 'session_date_iso': session_date_iso}
+    return stream_session_replay_ticks(
+        user_id=int(user_id),
+        ticker=str(ticker or '').strip().upper(),
+        session_day=sd,
+        pace_sec=pace_sec,
+        max_snapshots=max_snapshots,
+    )

@@ -4,6 +4,7 @@ from django.conf import settings
 
 from trader.environment import (
     ENV_REAL,
+    ENV_REPLAY,
     ENV_SIMULATOR,
     environment_label,
     get_session_environment,
@@ -24,6 +25,7 @@ def trading_environment(request):
         'trading_environment_label': environment_label(env),
         'trading_environment_is_real': env == ENV_REAL,
         'trading_environment_is_simulator': env == ENV_SIMULATOR,
+        'trading_environment_is_replay': env == ENV_REPLAY,
     }
 
 

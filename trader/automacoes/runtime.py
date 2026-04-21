@@ -50,15 +50,17 @@ def runtime_max_open_operations(user, trading_environment: str | None) -> int:
     return _normalize_max_open_operations(getattr(row, 'max_open_operations', 1))
 
 
-# Cada «operação» das estratégias day trade usa até 2 contratos/ações por entrada.
-_UNITS_PER_STRATEGY_OPERATION = 2
+# Contratos/acções por «operação» de entrada (1 = uma unidade por operação; alinhado ao campo Máx. operações abertas).
+_UNITS_PER_STRATEGY_OPERATION = 1
 
 
 def runtime_max_position_units(user, trading_environment: str | None) -> int:
     """
-    Teto de quantidade total (soma de quantity_open) por ticker/ambiente,
-    derivado de max_open_operations × unidades por operação.
-    Evita acumular ex.: 12 vendido numa única perna quando o limite era 1 operação.
+    Teto de quantidade total (soma de ``quantity_open``) por ticker/ambiente,
+    derivado de ``max_open_operations`` × unidades por operação (predef.: 1).
+
+    Com 1 unidade por operação, o número digitado em «Máx. operações abertas» corresponde
+    ao teto de quantidade em aberto (ex.: 3 → até 3 ações/contratos no agregado permitido).
     """
     mo = runtime_max_open_operations(user, trading_environment)
     return max(1, mo * _UNITS_PER_STRATEGY_OPERATION)

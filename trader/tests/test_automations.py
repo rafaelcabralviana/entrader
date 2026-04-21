@@ -1,7 +1,7 @@
 from django.contrib.auth.models import User
 from django.test import Client, TestCase
 
-from trader.environment import ENV_REAL, ENV_SIMULATOR
+from trader.environment import ENV_REAL, ENV_REPLAY, ENV_SIMULATOR
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -46,7 +46,7 @@ class AutomationsDashboardTests(TestCase):
         self.assertContains(r, '/automacoes/logs/')
         self.assertContains(r, 'sidebar-estrategias')
         self.assertContains(r, 'sidebar-simulacao')
-        self.assertContains(r, 'Simulação (teste)')
+        self.assertContains(r, 'Simulador')
         self.assertContains(r, 'Salvar estrategias')
         self.assertContains(r, 'class="strat-modal-open"')
         self.assertContains(r, 'strat-modal-leafar')
@@ -58,13 +58,11 @@ class AutomationsDashboardTests(TestCase):
         self.assertContains(r, 'id="automacoes-log-only-warn"')
 
     def test_save_strategies_persists(self):
-        WatchedTicker.objects.create(ticker='PETR4', enabled=True)
         self.client.post(
             '/automacoes/',
             {
                 'form_name': 'automation_strategies',
                 'strategy_stop_percentual_book': 'on',
-                'automation_live_ticker': 'PETR4',
             },
         )
         row = AutomationStrategyToggle.objects.get(
@@ -73,6 +71,39 @@ class AutomationsDashboardTests(TestCase):
             trading_environment=ENV_SIMULATOR,
         )
         self.assertTrue(row.enabled)
+
+    def test_save_strategies_in_replay_uses_simulator_storage(self):
+        """Replay partilha toggles com Simulador; a BD deve usar trading_environment=simulator."""
+        session = self.client.session
+        session['trader_environment'] = ENV_REPLAY
+        session.save()
+        self.client.post(
+            '/automacoes/',
+            {
+                'form_name': 'automation_strategies',
+                'strategy_stop_percentual_book': 'on',
+            },
+        )
+        row = AutomationStrategyToggle.objects.get(
+            user=self.user,
+            strategy_key='stop_percentual_book',
+            trading_environment=ENV_SIMULATOR,
+        )
+        self.assertTrue(row.enabled)
+
+    def test_runtime_toggle_saves_live_ticker_per_environment(self):
+        WatchedTicker.objects.create(ticker='PETR4', enabled=True)
+        self.client.post(
+            '/automacoes/',
+            {
+                'form_name': 'automation_runtime_toggle',
+                'runtime_environment': ENV_SIMULATOR,
+                'robot_enabled': '0',
+                'runtime_action': 'save_all',
+                'max_open_operations': '2',
+                'automation_live_ticker': 'PETR4',
+            },
+        )
         profile = AutomationExecutionProfile.objects.get(
             user=self.user,
             trading_environment=ENV_SIMULATOR,
@@ -178,13 +209,15 @@ class AutomationsDashboardTests(TestCase):
         self.assertEqual(r.status_code, 302)
 
     def test_clear_thoughts_clears_replay_shadow_ledger(self):
-        """POST limpar-logs no simulador também apaga PnL/posições replay fictício."""
+        """POST limpar-logs no Replay apaga PnL/posições do ledger fictício."""
         from django.utils import timezone as dj_tz
+
+        from trader.environment import ENV_REPLAY
 
         now = dj_tz.now()
         p = Position.objects.create(
             ticker='XX99',
-            trading_environment=Position.TradingEnvironment.SIMULATOR,
+            trading_environment=Position.TradingEnvironment.REPLAY,
             position_lane=Position.Lane.REPLAY_SHADOW,
             side=Position.Side.LONG,
             quantity_open=Decimal('100'),
@@ -204,11 +237,60 @@ class AutomationsDashboardTests(TestCase):
         self.assertTrue(Position.objects.filter(pk=p.pk).exists())
         r = self.client.post(
             '/automacoes/limpar-logs/',
-            {'next': '/automacoes/', 'env': 'simulator'},
+            {'next': '/automacoes/', 'env': 'replay'},
         )
         self.assertEqual(r.status_code, 302)
         self.assertFalse(Position.objects.filter(ticker='XX99').exists())
         self.assertFalse(ClosedOperation.objects.filter(position__ticker='XX99').exists())
+
+    def test_replay_shadow_ledger_clear_without_clearing_logs(self):
+        """POST dedicado limpa só replay_shadow; exige sessão Replay."""
+        from django.utils import timezone as dj_tz
+
+        now = dj_tz.now()
+        p = Position.objects.create(
+            ticker='YY88',
+            trading_environment=Position.TradingEnvironment.REPLAY,
+            position_lane=Position.Lane.REPLAY_SHADOW,
+            side=Position.Side.SHORT,
+            quantity_open=Decimal('10'),
+            avg_open_price=Decimal('20'),
+            opened_at=now,
+            is_active=True,
+        )
+        session = self.client.session
+        session['trader_environment'] = ENV_REPLAY
+        session.save()
+        r = self.client.post(
+            '/automacoes/limpar-ledger-replay-ficticio/',
+            {'next': '/automacoes/'},
+        )
+        self.assertEqual(r.status_code, 302)
+        self.assertFalse(Position.objects.filter(pk=p.pk).exists())
+
+    def test_replay_shadow_ledger_clear_rejects_non_replay_session(self):
+        from django.utils import timezone as dj_tz
+
+        now = dj_tz.now()
+        p = Position.objects.create(
+            ticker='ZZ77',
+            trading_environment=Position.TradingEnvironment.REPLAY,
+            position_lane=Position.Lane.REPLAY_SHADOW,
+            side=Position.Side.LONG,
+            quantity_open=Decimal('1'),
+            avg_open_price=Decimal('1'),
+            opened_at=now,
+            is_active=True,
+        )
+        session = self.client.session
+        session['trader_environment'] = ENV_SIMULATOR
+        session.save()
+        r = self.client.post(
+            '/automacoes/limpar-ledger-replay-ficticio/',
+            {'next': '/automacoes/'},
+        )
+        self.assertEqual(r.status_code, 302)
+        self.assertTrue(Position.objects.filter(pk=p.pk).exists())
 
     def test_parse_calendar_day_brt_invalid_falls_back(self):
         d = parse_calendar_day_brt('not-a-date')

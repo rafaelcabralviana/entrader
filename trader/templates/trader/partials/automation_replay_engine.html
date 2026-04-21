@@ -1,15 +1,30 @@
-{# Barra de replay — o JS fica em automation_replay_script.html (extra_js, após candles). #}
-<div id="automation-replay-bar" class="automation-replay-bar" aria-label="Replay do pregão">
+{# Barra de replay — JS em automation_replay_script.html (extra_js, após candles). Só ambiente Replay. #}
+<div
+  id="automation-replay-bar"
+  class="automation-replay-bar"
+  aria-label="Relógio virtual do replay"
+  data-replay-start="{{ replay_day_start_iso|default:'' }}"
+  data-replay-cap="{{ replay_day_end_iso|default:'' }}"
+  data-replay-cursor="{{ replay_virtual_cursor_iso|default:'' }}"
+>
   <div class="automation-replay-row">
-    <strong>Replay do dia</strong>
+    <strong>Relógio virtual</strong>
+    <span class="hint" style="font-weight:normal;">
+      Avança o instante simulado (replay_until) como se o pregão decorresse; o gráfico continua a ler candles do banco até esse instante.
+      O motor em batch (Celery) é opcional e independente deste relógio.
+      <strong>Iniciar</strong> e <strong>Continuar</strong> avançam a partir do instante actual do relógio (não voltam ao início do pregão); <strong>Reinício</strong> repõe o cursor no abrir (BRT).
+    </span>
+  </div>
+  <div class="automation-replay-row">
     <span id="automation-replay-status" class="hint">Aguardando…</span>
   </div>
   <div class="automation-replay-controls">
-    <button type="button" class="submit" id="automation-replay-play" disabled>Play</button>
+    <button type="button" class="submit" id="automation-replay-play">Iniciar</button>
+    <button type="button" class="submit" id="automation-replay-continue" title="Retoma no instante em que pausou, sem voltar ao início do pregão">Continuar</button>
     <button type="button" class="btn-secondary" id="automation-replay-pause" disabled>Pausa</button>
-    <button type="button" class="btn-secondary" id="automation-replay-reset">Início</button>
-    <label class="automation-replay-speed">Velocidade
-      <select id="automation-replay-speed">
+    <button type="button" class="btn-secondary" id="automation-replay-reset">Reinício</button>
+    <label class="automation-replay-speed">Velocidade do relógio
+      <select id="automation-replay-speed" title="Quanto tempo de pregão (eixo do relógio) avança por cada tick (~0,5 s de parede)">
         <option value="0.25">0,25×</option>
         <option value="0.5">0,5×</option>
         <option value="1" selected>1×</option>
@@ -20,14 +35,26 @@
         <option value="16">16×</option>
         <option value="24">24×</option>
         <option value="32">32×</option>
+        <option value="48">48×</option>
+        <option value="64">64×</option>
+        <option value="96">96×</option>
+        <option value="128">128×</option>
+        <option value="192">192×</option>
+        <option value="256">256×</option>
       </select>
     </label>
   </div>
-  <div class="automation-replay-progress-wrap">
-    <input type="range" id="automation-replay-scrub" min="0" max="0" value="0" disabled style="width:100%;max-width:36rem;">
-    <div class="automation-replay-time">
-      <span id="automation-replay-time-label">—</span>
-      <span id="automation-replay-frame-count" class="hint"></span>
-    </div>
+  <div class="automation-replay-time">
+    <span id="automation-replay-time-label">—</span>
+  </div>
+  <div class="automation-replay-row" style="margin-top:0.65rem;padding-top:0.45rem;border-top:1px solid var(--border);">
+    <span class="hint" style="font-weight:normal;"><strong>Motor em batch (Celery)</strong> — percorre snapshots no servidor; não move o relógio virtual aqui.</span>
+  </div>
+  <div class="automation-replay-controls">
+    <button type="button" class="btn-secondary" id="automation-replay-motor-run">Enfileirar motor</button>
+    <label class="hint" style="display:inline-flex;align-items:center;gap:0.35rem;">
+      Máx. snapshots
+      <input type="number" id="automation-replay-max" min="1" step="1" placeholder="padrão" style="width:6rem;" title="Vazio = TRADER_REPLAY_STREAM_MAX_SNAPSHOTS (ex.: 5000)">
+    </label>
   </div>
 </div>

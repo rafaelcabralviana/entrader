@@ -8,7 +8,10 @@ sobreposição [low, high] do candle com o bin (semelhante ao histograma VP do p
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, Literal
+
+from trader.automacoes.session_range_bracket import session_high_low_from_candles
 
 Side = Literal['Buy', 'Sell']
 
@@ -241,6 +244,66 @@ def _price_tick(price: float) -> float:
     return 0.01
 
 
+def _session_range_and_edge_room(
+    candles: list[dict[str, Any]],
+    last: float,
+    tick: float,
+    *,
+    vp_hi: float,
+    vp_lo: float,
+) -> tuple[float, float, float, float]:
+    """
+    Retorna ``(session_hi, session_lo, R, edge_room)``.
+
+    ``R`` = máxima − mínima do dia (velas); ``edge_room`` = distância do último à borda
+    mais próxima (mínima ou máxima), com piso em ticks — base para «perto/longe» vs formação.
+    """
+    bounds = session_high_low_from_candles(candles)
+    if bounds is None:
+        s_hi, s_lo = float(vp_hi), float(vp_lo)
+    else:
+        s_hi, s_lo = float(bounds[0]), float(bounds[1])
+    if s_hi < s_lo:
+        s_hi, s_lo = s_lo, s_hi
+    t = max(float(tick), 1e-12)
+    R = max(s_hi - s_lo, t * 4.0)
+    below = max(0.0, last - s_lo)
+    above = max(0.0, s_hi - last)
+    edge_room = max(t * 8.0, min(below, above))
+    return s_hi, s_lo, R, edge_room
+
+
+def _min_sep_abs_session(
+    *,
+    R: float,
+    edge_room: float,
+    min_price_sep_frac: float,
+    session_local_sep_frac: float,
+) -> float:
+    """
+    Separação mínima preço↔POC: maior entre fração da amplitude do dia e fração do «espaço»
+    até à borda mais próxima (preço encostado num extremo → escala local).
+    """
+    weak = max(0.004, float(min_price_sep_frac) * 0.8)
+    loc = max(0.02, min(0.55, float(session_local_sep_frac)))
+    return max(weak * float(R), loc * float(edge_room))
+
+
+def _candle_dt(c: dict[str, Any]) -> datetime | None:
+    raw = c.get('bucket_start') or c.get('label') or c.get('captured_at')
+    if not raw:
+        return None
+    s = str(raw).strip()
+    if not s:
+        return None
+    if s.endswith('Z'):
+        s = s[:-1] + '+00:00'
+    try:
+        return datetime.fromisoformat(s)
+    except ValueError:
+        return None
+
+
 def detect_leafar_signal(
     candles: list[dict[str, Any]],
     *,
@@ -251,15 +314,34 @@ def detect_leafar_signal(
     trend_window: int = 7,
     trend_min_frac: float = 0.5,
     min_price_sep_frac: float = 0.006,
+    session_local_sep_frac: float = 0.22,
+    poc_stability_bars: int = 2,
+    poc_dominance_ratio: float = 1.08,
+    persistence_bars: int = 2,
+    min_recent_range_ticks: int = 8,
+    min_session_minutes: int = 18,
 ) -> LeafarSignal | None:
     """
     Estratégia leafaR (modo simplificado):
     - identifica o nível de maior volume (POC/#1);
     - se preço atual está abaixo desse nível -> BUY buscando o nível;
     - se preço atual está acima desse nível -> SELL buscando o nível.
+
+    A separação preço↔POC considera a **amplitude do dia** (máx./mín. nas velas) e a
+    distância do último preço à **borda da sessão mais próxima**, para definir o mínimo
+    aceitável («perto» demais do POC = sem sinal).
     """
-    if len(candles) < max(6, min_candles // 3):
+    # Cautela de arranque: exige amostra mínima real (antes usava min_candles/3).
+    if len(candles) < max(6, int(min_candles)):
         return None
+    msm = max(0, int(min_session_minutes))
+    if msm > 0 and len(candles) >= 2:
+        d0 = _candle_dt(candles[0])
+        d1 = _candle_dt(candles[-1])
+        if d0 is not None and d1 is not None:
+            elapsed_min = (d1 - d0).total_seconds() / 60.0
+            if elapsed_min < float(msm) - 1e-12:
+                return None
     vp = compute_volume_profile(candles, num_bins=num_bins)
     if vp is None:
         return None
@@ -271,6 +353,12 @@ def detect_leafar_signal(
     poc_vol = float(vols[poc_i] or 0.0)
     if poc_vol <= 0:
         return None
+    if n >= 2 and poc_dominance_ratio > 1.0:
+        top_two = sorted((float(v or 0.0) for v in vols), reverse=True)[:2]
+        if len(top_two) >= 2 and top_two[1] > 1e-12:
+            dominance = top_two[0] / top_two[1]
+            if dominance < float(poc_dominance_ratio):
+                return None
     poc = (edges[poc_i] + edges[poc_i + 1]) / 2.0
     last = _last_close(candles)
     if last is None:
@@ -281,12 +369,84 @@ def detect_leafar_signal(
     vp_span = max(edges[-1] - edges[0], 1e-12)
     sep_price = abs(last - poc) / vp_span
     tick = _price_tick(last)
+    _, _, R, edge_room = _session_range_and_edge_room(
+        candles, last, tick, vp_hi=edges[-1], vp_lo=edges[0]
+    )
+    min_sep_abs = _min_sep_abs_session(
+        R=R,
+        edge_room=edge_room,
+        min_price_sep_frac=min_price_sep_frac,
+        session_local_sep_frac=session_local_sep_frac,
+    )
+    sep_abs = abs(last - poc)
+    sep_vs_rng = sep_abs / max(R, 1e-12)
+    sep_vs_edge = sep_abs / max(edge_room, 1e-12)
 
-    # Regra direta: só evita sinal quando literalmente colado ao volume #1.
+    # Afastamento mínimo vs amplitude do dia e vs borda mais próxima (formaçao «longe» do POC).
+    if sep_abs < min_sep_abs:
+        return None
+    # Colado ao POC no grid do VP: poucos bins e ainda «fraco» em termos do próprio histograma.
     weak_bins = max(1, int(min_bins_from_poc))
     weak_sep = max(0.004, float(min_price_sep_frac) * 0.8)
     if sep_bins <= weak_bins and sep_price <= weak_sep:
         return None
+
+    # Persistência mínima: evita disparo em 1 tick de afastamento pontual.
+    pb = max(1, int(persistence_bars))
+    if pb > 1 and len(candles) >= pb:
+        recent_closes: list[float] = []
+        for c in candles[-pb:]:
+            try:
+                recent_closes.append(float(c.get('close')))
+            except (TypeError, ValueError):
+                recent_closes = []
+                break
+        if len(recent_closes) == pb:
+            if last < poc and not all(px < poc for px in recent_closes):
+                return None
+            if last > poc and not all(px > poc for px in recent_closes):
+                return None
+
+    # Comprime ruído lateral: se range recente for muito curto, não entra.
+    mrt = max(0, int(min_recent_range_ticks))
+    if mrt > 0:
+        hw = max(8, min(22, int(trend_window) * 2))
+        seg = candles[-hw:] if len(candles) >= hw else candles
+        highs: list[float] = []
+        lows: list[float] = []
+        for c in seg:
+            try:
+                highs.append(float(c['high']))
+                lows.append(float(c['low']))
+            except (KeyError, TypeError, ValueError):
+                continue
+        if highs and lows:
+            recent_range = max(highs) - min(lows)
+            if recent_range < (_price_tick(last) * float(mrt)):
+                return None
+
+    # Estabilidade do POC: exige o bin dominante consistente nas últimas barras.
+    psb = max(1, int(poc_stability_bars))
+    if psb > 1 and len(candles) >= max(16, psb + 2):
+        stable_ok = True
+        for back in range(1, psb):
+            end = len(candles) - back
+            if end < max(16, min_candles // 2):
+                break
+            vp_prev = compute_volume_profile(candles[:end], num_bins=num_bins)
+            if vp_prev is None:
+                stable_ok = False
+                break
+            _, prev_vols = vp_prev
+            if not prev_vols:
+                stable_ok = False
+                break
+            prev_idx = max(range(len(prev_vols)), key=lambda i: prev_vols[i])
+            if prev_idx != poc_i:
+                stable_ok = False
+                break
+        if not stable_ok:
+            return None
 
     # Direção determinística:
     # preço abaixo do #1 => Buy ; preço acima do #1 => Sell
@@ -302,9 +462,6 @@ def detect_leafar_signal(
 
     if prefer_side == 'Buy':
         target_px = float(poc)
-        target_sep = abs(target_px - last) / vp_span
-        if target_sep < max(0.004, min_price_sep_frac * 0.8):
-            return None
         sl = (min(recent_lows) if recent_lows else last) - tick * 2
         if sl >= last - tick * 0.5:
             sl = last - tick * 3
@@ -318,14 +475,12 @@ def detect_leafar_signal(
             corridor_max_vol=0.0,
             reason=(
                 f'Compra direta: preço abaixo do volume forte (#1≈{poc:.4f}, vol≈{poc_vol:.0f}); '
-                f'alvo no próprio #1 do VP dia. sep≈{sep_price:.4f}'
+                f'alvo no próprio #1 do VP dia. sep_rng={sep_vs_rng:.4f} sep_vs_borda={sep_vs_edge:.4f} '
+                f'(mín. abs {min_sep_abs:.4f}; R={R:.4f})'
             ),
         )
 
     target_px = float(poc)
-    target_sep = abs(target_px - last) / vp_span
-    if target_sep < max(0.004, min_price_sep_frac * 0.8):
-        return None
     sl = (max(recent_highs) if recent_highs else last) + tick * 2
     if sl <= last + tick * 0.5:
         sl = last + tick * 3
@@ -339,6 +494,7 @@ def detect_leafar_signal(
         corridor_max_vol=0.0,
         reason=(
             f'Venda direta: preço acima do volume forte (#1≈{poc:.4f}, vol≈{poc_vol:.0f}); '
-            f'alvo no próprio #1 do VP dia. sep≈{sep_price:.4f}'
+            f'alvo no próprio #1 do VP dia. sep_rng={sep_vs_rng:.4f} sep_vs_borda={sep_vs_edge:.4f} '
+            f'(mín. abs {min_sep_abs:.4f}; R={R:.4f})'
         ),
     )

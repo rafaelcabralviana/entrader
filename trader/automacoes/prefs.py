@@ -10,7 +10,7 @@ from django.http import QueryDict
 from django.db.models import Q
 
 from trader.automacoes.strategies import AUTOMATION_STRATEGIES, AUTOMATION_STRATEGY_KEYS
-from trader.environment import normalize_environment
+from trader.environment import normalize_environment, strategy_toggle_storage_environment
 from trader.models import AutomationStrategyToggle, AutomationTrailingStopPreference
 
 
@@ -62,10 +62,11 @@ def save_trailing_stop_adjustment_from_post(
 
 
 def _resolve_toggle_row(user, env: str, strategy_key: str, *, execution_profile=None):
+    se = strategy_toggle_storage_environment(env)
     base = AutomationStrategyToggle.objects.filter(
         user=user,
         strategy_key=strategy_key,
-        trading_environment=env,
+        trading_environment=se,
     )
     if execution_profile is None:
         return base.filter(execution_profile__isnull=True).first()
@@ -78,9 +79,10 @@ def _resolve_toggle_row(user, env: str, strategy_key: str, *, execution_profile=
 def get_strategy_enabled_map(user, trading_environment: str, *, execution_profile=None) -> dict[str, bool]:
     """Mapa ``strategy_key -> enabled`` para o ambiente; padrão ``False`` se não houver linha."""
     env = normalize_environment(trading_environment)
+    se = strategy_toggle_storage_environment(env)
     base = AutomationStrategyToggle.objects.filter(
         user=user,
-        trading_environment=env,
+        trading_environment=se,
         strategy_key__in=AUTOMATION_STRATEGY_KEYS,
     )
     if execution_profile is None:
@@ -110,6 +112,7 @@ def save_strategy_toggles_from_post(
 ) -> None:
     """Interpreta checkboxes ``strategy_<key>=on`` e persiste para o ambiente indicado."""
     env = normalize_environment(trading_environment)
+    se = strategy_toggle_storage_environment(env)
     for s in AUTOMATION_STRATEGIES:
         key = s['key']
         enabled = post.get(f'strategy_{key}') == 'on'
@@ -197,10 +200,12 @@ def save_strategy_toggles_from_post(
                     pass
             else:
                 merge.pop('max_silence_sec', None)
+        # Mesmo critério de leitura (``get_strategy_enabled_map`` / ``_resolve_toggle_row``):
+        # Replay partilha armazenamento com Simulador.
         AutomationStrategyToggle.objects.update_or_create(
             user=user,
             strategy_key=key,
-            trading_environment=env,
+            trading_environment=se,
             execution_profile=execution_profile,
             defaults={
                 'enabled': enabled,

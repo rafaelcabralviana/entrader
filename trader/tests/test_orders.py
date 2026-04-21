@@ -10,6 +10,7 @@ from trader.panel_context import (
     _order_is_cancellable,
     _order_status_raw,
     order_column_heading_pt,
+    quote_live_allows_automation_orders,
     quote_status_is_end_of_day,
     tabular_from_api_payload,
 )
@@ -25,6 +26,20 @@ class QuoteStatusEndOfDayTests(SimpleTestCase):
         self.assertFalse(quote_status_is_end_of_day({'status': 'Trading'}))
         self.assertFalse(quote_status_is_end_of_day(None))
         self.assertFalse(quote_status_is_end_of_day({}))
+
+
+class QuoteLiveAllowsAutomationOrdersTests(SimpleTestCase):
+    def test_trading_and_missing_status_allow(self):
+        self.assertTrue(quote_live_allows_automation_orders({'status': 'Trading'}))
+        self.assertTrue(quote_live_allows_automation_orders({'Status': 'TRADING'}))
+        self.assertTrue(quote_live_allows_automation_orders({}))
+        self.assertTrue(quote_live_allows_automation_orders({'price': 100}))
+        self.assertTrue(quote_live_allows_automation_orders(None))
+
+    def test_endofday_and_non_trading_block(self):
+        self.assertFalse(quote_live_allows_automation_orders({'status': 'EndOfDay'}))
+        self.assertFalse(quote_live_allows_automation_orders({'status': 'PreTrading'}))
+        self.assertFalse(quote_live_allows_automation_orders({'status': 'AfterTrading'}))
 
 
 class OrderColumnHeadingTests(SimpleTestCase):
@@ -712,6 +727,7 @@ class CeleryCollectQuotesTests(SimpleTestCase):
         _mock_auto,
     ):
         mock_settings.TRADER_WATCH_ENABLED = True
+        mock_settings.TRADER_QUOTE_SAVE_BRT_WINDOW_ENABLED = False
         mock_settings.TRADER_WATCH_TICKERS = []
         mock_watched.objects.filter.return_value.values_list.return_value = ['PETR4', 'VALE3']
         mock_fetch_quote.return_value = {'ticker': 'PETR4', 'lastPrice': 10.0}
@@ -750,6 +766,7 @@ class CeleryCollectQuotesTests(SimpleTestCase):
         from trader.tasks import _WATCH_STANDBY_UNTIL_KEY, collect_watch_quotes
 
         mock_settings.TRADER_WATCH_ENABLED = True
+        mock_settings.TRADER_QUOTE_SAVE_BRT_WINDOW_ENABLED = False
         mock_settings.TRADER_WATCH_STANDBY_ENABLED = True
         mock_settings.TRADER_WATCH_TICKERS = []
         mock_watched.objects.filter.return_value.values_list.return_value = ['PETR4', 'VALE3']
@@ -779,6 +796,7 @@ class CeleryCollectQuotesTests(SimpleTestCase):
         from trader.tasks import _WATCH_STANDBY_UNTIL_KEY, collect_watch_quotes
 
         mock_settings.TRADER_WATCH_ENABLED = True
+        mock_settings.TRADER_QUOTE_SAVE_BRT_WINDOW_ENABLED = False
         mock_settings.TRADER_WATCH_STANDBY_ENABLED = True
         cache.set(_WATCH_STANDBY_UNTIL_KEY, time.time() + 3600.0)
 

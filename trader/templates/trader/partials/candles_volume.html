@@ -52,6 +52,19 @@ window.__ENTRADE_AUTOMATION_SIM__ = {
   /** Histórico local de preços TP/SL/entrada para mostrar «rastro» do trailing (modo foco). */
   var trailPriceHistory = [];
   var trailHistLaneKey = '';
+  /**
+   * Quando o servidor devolve bracket vazio intercalado com bracket válido (poll + estratégia),
+   * mantém vários refreshes o último bracket com lanes para não saltar entre «modo foco» trailing e escala normal.
+   */
+  var BRACKET_LIVE_HOLD_MAX_MISSES = 12;
+  var BRACKET_LIVE_HOLD_MS = 45000;
+  var BRACKET_FOCUS_STICKY_MS = 12000;
+  var bracketLiveHold = null;
+  var bracketLiveMissCount = 0;
+  var bracketLiveHoldUntilTs = 0;
+  var trailingFocusLastSeenTs = 0;
+  /** Coalesce vários renderWindow no mesmo frame (evita piscar entre duas escalas). */
+  var renderWindowRafId = null;
   // Evitar empilhar com mercado + strip + log de automações (mesma página).
   var POLL_MS = 2400;
   var pollTimer = null;
@@ -88,13 +101,190 @@ window.__ENTRADE_AUTOMATION_SIM__ = {
   var progressiveMorePending = false;
   var progressiveNextChunkIndex = 1;
   var progressiveNextSegmentIndex = 0;
-  /** Encadeamento automático 1000-em-1000 até o fim do dia (evita GET único com 50k+ linhas). */
-  var progressiveChainActive = false;
   var progressiveLoadSeq = 0;
   var progressiveTailInflight = false;
   var progressiveTailScheduled = false;
   var progressiveTailTimer = null;
-  var PROGRESSIVE_TAIL_DEBOUNCE_MS = 0;
+  /** Espaço entre um GET progressivo e o próximo (o encadeamento automático foi removido — sobrecarregava o worker). */
+  var PROGRESSIVE_TAIL_DEBOUNCE_MS = 220;
+
+  /** Um GET do dia (sem replay_until) + recorte no cliente = mesmo custo que «abrir o dia» no gráfico. */
+  var _replayChartMaster = null;
+  var _replayChartBootstrap = false;
+  var _replayMasterFetchSeq = 0;
+  var _replayMasterInflight = false;
+  var _replayMasterPendingCbs = [];
+
+  try {
+    window.__ENTRADE_REPLAY_CHART_MASTER_READY = false;
+  } catch (eRM0) {}
+
+  function replayIsoMs(iso) {
+    var s = String(iso || '').trim();
+    if (!s) return 0;
+    var t = Date.parse(s);
+    if (!isFinite(t) && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(s) && !/[Zz]|[+-]\d{2}:?\d{2}$/.test(s)) {
+      t = Date.parse(s + '-03:00');
+    }
+    return isFinite(t) ? t : 0;
+  }
+
+  window.__ENTRADE_REPLAY_INVALIDATE_DAY_MASTER = function() {
+    try {
+      _replayChartMaster = null;
+      _replayMasterFetchSeq += 1;
+      _replayMasterPendingCbs = [];
+      _replayMasterInflight = false;
+      window.__ENTRADE_REPLAY_CHART_MASTER_READY = false;
+    } catch (eI) {}
+  };
+
+  window.__ENTRADE_REPLAY_TRIM_CHART = function(iso) {
+    try {
+      if (!_replayChartMaster || !iso) return false;
+      var capMs = replayIsoMs(iso);
+      if (!capMs) return false;
+      var mc = _replayChartMaster.candles;
+      var out = [];
+      for (var i = 0; i < mc.length; i++) {
+        var c = mc[i] || {};
+        var bms = replayIsoMs(c.bucket_start);
+        if (!bms) continue;
+        if (bms <= capMs) out.push(c);
+      }
+      if (!out.length) return false;
+      lastData = _replayChartMaster.lastData || lastData;
+      allCandles = out;
+      var ml = out.length;
+      function filtByIdx(arr) {
+        if (!arr || !arr.length) return [];
+        var z = [];
+        for (var j = 0; j < arr.length; j++) {
+          var m = arr[j] || {};
+          var ix = Number(m.idx);
+          if (!isFinite(ix)) continue;
+          if (ix < ml) z.push(m);
+        }
+        return z;
+      }
+      allStatusChanges = filtByIdx(_replayChartMaster.status);
+      allTradeMarkers = filtByIdx(_replayChartMaster.trades);
+      allStrategyMarkers = filtByIdx(_replayChartMaster.strategies);
+      applyBracketLiveFromResponse(_replayChartMaster.bracket);
+      followLiveRightEdge = true;
+      var maxStart = Math.max(0, allCandles.length - VIEW_WINDOW);
+      windowStart = maxStart;
+      if (scrollInput) {
+        scrollInput.max = String(maxStart);
+        scrollInput.value = String(windowStart);
+      }
+      renderWindow();
+      return true;
+    } catch (eT) {
+      return false;
+    }
+  };
+
+  window.__ENTRADE_REPLAY_ENSURE_DAY_MASTER = function(done) {
+    try {
+      if (!sessionDateSelect || !String(sessionDateSelect.value || '').trim()) {
+        if (typeof done === 'function') done();
+        return;
+      }
+      var sess = String(sessionDateSelect.value).trim();
+      var t = (tickerInput.value || '').trim().toUpperCase();
+      var interval = intervalSelect.value || '1m';
+      if (
+        _replayChartMaster &&
+        _replayChartMaster.ticker === t &&
+        _replayChartMaster.session === sess &&
+        _replayChartMaster.interval === interval
+      ) {
+        try {
+          window.__ENTRADE_REPLAY_CHART_MASTER_READY = true;
+        } catch (eR) {}
+        if (typeof done === 'function') done();
+        return;
+      }
+      if (_replayMasterInflight) {
+        if (typeof done === 'function') _replayMasterPendingCbs.push(done);
+        return;
+      }
+      _replayMasterInflight = true;
+      if (typeof done === 'function') _replayMasterPendingCbs.push(done);
+
+      _replayMasterFetchSeq += 1;
+      var mySeq = _replayMasterFetchSeq;
+      _replayChartBootstrap = true;
+      var ac = typeof AbortController !== 'undefined' ? new AbortController() : null;
+      var fetchOpts = {
+        credentials: 'same-origin',
+        headers: { 'Accept': 'application/json' },
+      };
+      if (ac) fetchOpts.signal = ac.signal;
+      var url =
+        endpoint +
+        '?ticker=' +
+        encodeURIComponent(t) +
+        '&interval=' +
+        encodeURIComponent(interval) +
+        '&limit=' +
+        encodeURIComponent(String(FETCH_LIMIT)) +
+        sessionDateQuery() +
+        '&replay_day_master=1';
+      fetch(url, fetchOpts)
+        .then(function(r) {
+          if (mySeq !== _replayMasterFetchSeq) return null;
+          if (!r.ok) throw new Error('HTTP ' + r.status);
+          return r.json();
+        })
+        .then(function(data) {
+          if (mySeq !== _replayMasterFetchSeq || data === null) return;
+          _replayChartBootstrap = false;
+          _replayChartMaster = {
+            ticker: t,
+            session: sess,
+            interval: interval,
+            lastData: data || {},
+            candles: data && data.candles ? data.candles.slice() : [],
+            status: data && data.status_changes ? data.status_changes.slice() : [],
+            trades: data && data.trade_markers ? data.trade_markers.slice() : [],
+            strategies: data && data.strategy_markers ? data.strategy_markers.slice() : [],
+            bracket: data && data.bracket_live != null ? data.bracket_live : null,
+          };
+          try {
+            window.__ENTRADE_REPLAY_CHART_MASTER_READY = true;
+          } catch (eR2) {}
+        })
+        .catch(function(err) {
+          _replayChartBootstrap = false;
+          if (err && err.name === 'AbortError') return;
+          try {
+            window.__ENTRADE_REPLAY_CHART_MASTER_READY = false;
+          } catch (eR3) {}
+        })
+        .finally(function() {
+          _replayChartBootstrap = false;
+          if (mySeq !== _replayMasterFetchSeq) {
+            _replayMasterInflight = false;
+            return;
+          }
+          _replayMasterInflight = false;
+          var q = _replayMasterPendingCbs.slice();
+          _replayMasterPendingCbs = [];
+          for (var i = 0; i < q.length; i++) {
+            try {
+              q[i]();
+            } catch (eCb) {}
+          }
+        });
+    } catch (eM) {
+      _replayChartBootstrap = false;
+      _replayMasterInflight = false;
+      _replayMasterPendingCbs = [];
+      if (typeof done === 'function') done();
+    }
+  };
 
   function isReplayCandles() {
     try {
@@ -129,11 +319,43 @@ window.__ENTRADE_AUTOMATION_SIM__ = {
 
   function replayCandlesQuery() {
     try {
+      /* GET «bootstrap» do dia inteiro (sem replay_until) para cache local — não anexar filtro. */
+      if (_replayChartBootstrap) return '';
       if (!window.__ENTRADE_REPLAY_MODE__) return '';
       var u = window.__ENTRADE_REPLAY_UNTIL__;
       if (u == null || String(u).trim() === '') return '';
       return '&replay_until=' + encodeURIComponent(String(u).trim());
     } catch (eQ) { return ''; }
+  }
+
+  function applyBracketLiveFromResponse(raw) {
+    var nowTs = Date.now();
+    var b = raw || null;
+    var lanes = (b && b.lanes) ? b.lanes : [];
+    if (lanes.length) {
+      bracketLiveHold = b;
+      bracketLiveMissCount = 0;
+      bracketLiveHoldUntilTs = nowTs + BRACKET_LIVE_HOLD_MS;
+      allBracketLive = b;
+      return;
+    }
+    var hold = bracketLiveHold;
+    var hLanes = (hold && hold.lanes) ? hold.lanes : [];
+    if (
+      hLanes.length &&
+      (
+        bracketLiveMissCount < BRACKET_LIVE_HOLD_MAX_MISSES ||
+        nowTs <= bracketLiveHoldUntilTs
+      )
+    ) {
+      bracketLiveMissCount++;
+      allBracketLive = hold;
+      return;
+    }
+    bracketLiveHold = null;
+    bracketLiveMissCount = 0;
+    bracketLiveHoldUntilTs = 0;
+    allBracketLive = b;
   }
 
   function sessionDateQuery() {
@@ -173,6 +395,9 @@ window.__ENTRADE_AUTOMATION_SIM__ = {
     try {
       window.__ENTRADE_REPLAY_MODE__ = false;
       window.__ENTRADE_REPLAY_UNTIL__ = '';
+      if (typeof window.__ENTRADE_REPLAY_INVALIDATE_DAY_MASTER === 'function') {
+        window.__ENTRADE_REPLAY_INVALIDATE_DAY_MASTER();
+      }
     } catch (eSim) {}
     ensureSessionDateOption(ymd);
     sessionDateSelect.value = ymd;
@@ -313,7 +538,15 @@ window.__ENTRADE_AUTOMATION_SIM__ = {
       maxVol = Math.max(maxVol, candles[i].volume || 0);
     }
     var blLanes = (bracketLive && bracketLive.lanes) ? bracketLive.lanes : [];
-    var trailingFocusMode = !!(blLanes && blLanes.length);
+    var lanesNow = !!(blLanes && blLanes.length);
+    var nowFocusTs = Date.now();
+    if (lanesNow) trailingFocusLastSeenTs = nowFocusTs;
+    var stickyFocus = (!lanesNow) && (nowFocusTs - trailingFocusLastSeenTs <= BRACKET_FOCUS_STICKY_MS);
+    if (!lanesNow && stickyFocus) {
+      var holdLanes = (bracketLiveHold && bracketLiveHold.lanes) ? bracketLiveHold.lanes : [];
+      if (holdLanes.length) blLanes = holdLanes;
+    }
+    var trailingFocusMode = lanesNow || stickyFocus;
     if (trailingFocusMode && blLanes.length) {
       var primLane = blLanes[0] || {};
       for (var plh = 0; plh < blLanes.length; plh++) {
@@ -842,7 +1075,7 @@ window.__ENTRADE_AUTOMATION_SIM__ = {
       );
     }
 
-    if (vpEnabled && !trailingFocusMode) {
+    if (vpEnabled) {
       var vpSource = candles;
       if (vpHistoricalEnabled && allCandles && allCandles.length) {
         if (allCandles.length <= VP_HISTORICAL_MAX_CANDLES) {
@@ -1273,81 +1506,8 @@ window.__ENTRADE_AUTOMATION_SIM__ = {
     );
   }
 
-  /**
-   * Após o 1º GET, encadeia imediatamente (setTimeout 0) cada bloco de 1000 snapshots até o fim do dia.
-   */
-  function runProgressiveChain(seq, chunkIdx, segIdx) {
-    if (seq !== candlesReqSeq) return;
-    progressiveChainActive = true;
-    progressiveTailInflight = true;
-    var url = buildProgressiveFetchUrl(chunkIdx, segIdx);
-    var fetchOpts = {
-      credentials: 'same-origin',
-      headers: { 'Accept': 'application/json' }
-    };
-    fetch(url, fetchOpts)
-      .then(function(r) {
-        if (seq !== candlesReqSeq) return null;
-        if (!r.ok) throw new Error('HTTP ' + r.status);
-        return r.json();
-      })
-      .then(function(data) {
-        progressiveTailInflight = false;
-        if (data === null) return;
-        if (seq !== candlesReqSeq) return;
-        lastData = data || {};
-        var pm = data.progressive_meta || {};
-        var baseLen = allCandles ? allCandles.length : 0;
-        allCandles = mergeCandlesAppend(allCandles || [], data.candles || []);
-        allStatusChanges = (allStatusChanges || []).concat(
-          offsetIdxList(data.status_changes || [], baseLen)
-        );
-        allTradeMarkers = (allTradeMarkers || []).concat(
-          offsetIdxList(data.trade_markers || [], baseLen)
-        );
-        allStrategyMarkers = (allStrategyMarkers || []).concat(
-          offsetIdxList(data.strategy_markers || [], baseLen)
-        );
-        if (data.bracket_live) allBracketLive = data.bracket_live;
-        progressiveMorePending = !!pm.has_more;
-        progressiveNextChunkIndex =
-          pm.next_chunk_index != null && pm.next_chunk_index !== undefined
-            ? pm.next_chunk_index
-            : chunkIdx + 1;
-        progressiveNextSegmentIndex =
-          pm.next_segment_index != null && pm.next_segment_index !== undefined
-            ? pm.next_segment_index
-            : 0;
-        var maxStart2 = Math.max(0, allCandles.length - VIEW_WINDOW);
-        if (followLiveRightEdge) {
-          windowStart = maxStart2;
-        } else if (windowStart > maxStart2) {
-          windowStart = maxStart2;
-        }
-        renderWindow();
-        if (pm.has_more && pm.next_chunk_index != null && pm.next_segment_index != null) {
-          setTimeout(function() {
-            runProgressiveChain(seq, pm.next_chunk_index, pm.next_segment_index);
-          }, 0);
-        } else {
-          progressiveChainActive = false;
-          progressiveMorePending = false;
-        }
-      })
-      .catch(function(err) {
-        progressiveTailInflight = false;
-        progressiveChainActive = false;
-        if (seq !== candlesReqSeq) return;
-        if (err && err.name === 'AbortError') return;
-        if (meta) {
-          meta.textContent = 'Falha ao carregar trecho — deslize ou clique em Ver.';
-        }
-      });
-  }
-
   function requestProgressiveTailIfNeeded() {
     if (!useProgressiveSessionLoad()) return;
-    if (progressiveChainActive) return;
     if (!progressiveMorePending || progressiveTailInflight) return;
     if (progressiveLoadSeq !== candlesReqSeq) return;
     if (!progressiveTailNeedFetch()) return;
@@ -1407,7 +1567,7 @@ window.__ENTRADE_AUTOMATION_SIM__ = {
           allStrategyMarkers = (allStrategyMarkers || []).concat(
             offsetIdxList(data.strategy_markers || [], baseLen)
           );
-          if (data.bracket_live) allBracketLive = data.bracket_live;
+          applyBracketLiveFromResponse(data.bracket_live);
           progressiveMorePending = !!pm.has_more;
           progressiveNextChunkIndex =
             pm.next_chunk_index != null && pm.next_chunk_index !== undefined
@@ -1436,7 +1596,7 @@ window.__ENTRADE_AUTOMATION_SIM__ = {
     }, PROGRESSIVE_TAIL_DEBOUNCE_MS);
   }
 
-  function renderWindow() {
+  function renderWindowImpl() {
     if (!allCandles || !allCandles.length) return;
     var maxStart = Math.max(0, allCandles.length - VIEW_WINDOW);
     if (followLiveRightEdge) {
@@ -1515,7 +1675,7 @@ window.__ENTRADE_AUTOMATION_SIM__ = {
     } else if (isLiveSessionDropdown() && candlesPollPaused) {
       histNote = ' | pregão encerrado — sem atualização automática';
     }
-    if (useProgressiveSessionLoad() && progressiveMorePending && !progressiveChainActive) {
+    if (useProgressiveSessionLoad() && progressiveMorePending) {
       histNote += ' | deslize até o fim da faixa para carregar o próximo trecho';
     }
     meta.textContent = 'Ticker ' + ((lastData && lastData.ticker) || '') +
@@ -1527,6 +1687,16 @@ window.__ENTRADE_AUTOMATION_SIM__ = {
       scrollMeta.textContent = 'Mostrando ' + visible.length + ' candles (de ' + (windowStart + 1) + ' a ' + (windowStart + visible.length) + ').';
     }
     requestProgressiveTailIfNeeded();
+  }
+
+  function renderWindow() {
+    if (renderWindowRafId !== null) {
+      cancelAnimationFrame(renderWindowRafId);
+    }
+    renderWindowRafId = requestAnimationFrame(function() {
+      renderWindowRafId = null;
+      renderWindowImpl();
+    });
   }
 
   function useProgressiveSessionLoad() {
@@ -1573,7 +1743,6 @@ window.__ENTRADE_AUTOMATION_SIM__ = {
     progressiveMorePending = false;
     progressiveNextChunkIndex = 1;
     progressiveNextSegmentIndex = 0;
-    progressiveChainActive = false;
     progressiveTailInflight = false;
     progressiveTailScheduled = false;
     if (progressiveTailTimer) {
@@ -1624,7 +1793,7 @@ window.__ENTRADE_AUTOMATION_SIM__ = {
         allStatusChanges = data.status_changes || [];
         allTradeMarkers = data.trade_markers || [];
         allStrategyMarkers = data.strategy_markers || [];
-        allBracketLive = data.bracket_live || null;
+        applyBracketLiveFromResponse(data.bracket_live);
         followLiveRightEdge = false;
         windowStart = 0;
         progressiveMorePending = !!pm.has_more;
@@ -1651,15 +1820,7 @@ window.__ENTRADE_AUTOMATION_SIM__ = {
             inflight = false;
             candlesAbort = null;
             setChartsLoading(false);
-            if (
-              pm.has_more &&
-              pm.next_chunk_index != null &&
-              pm.next_segment_index != null
-            ) {
-              runProgressiveChain(seq, pm.next_chunk_index, pm.next_segment_index);
-            } else {
-              requestProgressiveTailIfNeeded();
-            }
+            requestProgressiveTailIfNeeded();
             return;
           }
           meta.textContent = 'Sem candles para ' + t + ' neste trecho.';
@@ -1672,13 +1833,6 @@ window.__ENTRADE_AUTOMATION_SIM__ = {
         inflight = false;
         candlesAbort = null;
         setChartsLoading(false);
-        if (
-          progressiveMorePending &&
-          pm.next_chunk_index != null &&
-          pm.next_segment_index != null
-        ) {
-          runProgressiveChain(seq, pm.next_chunk_index, pm.next_segment_index);
-        }
       })
       .catch(function(err) {
         if (seq !== candlesReqSeq) return;
@@ -1698,6 +1852,10 @@ window.__ENTRADE_AUTOMATION_SIM__ = {
       meta.textContent = 'Informe um ticker.';
       return;
     }
+    if (force && fromPoll !== true) {
+      bracketLiveHold = null;
+      bracketLiveMissCount = 0;
+    }
     if (inflight && !force) return;
     /**
      * Overlay só em ações explícitas do usuário (carga inicial, Ver, troca de ticker/intervalo/dia).
@@ -1709,12 +1867,13 @@ window.__ENTRADE_AUTOMATION_SIM__ = {
     var showLoading = fromPoll !== true;
     candlesReqSeq += 1;
     var seq = candlesReqSeq;
-    if (useProgressiveSessionLoad() && !fromPoll) {
+    /* Replay (scrubber): o 1º chunk progressivo substitui o gráfico por poucos candles e «congela».
+       Só o GET único com session_date + replay_until cresce o pregão à medida do instante. */
+    if (useProgressiveSessionLoad() && !fromPoll && !isReplayCandles()) {
       loadProgressiveDay(force, showLoading, seq);
       return;
     }
     progressiveMorePending = false;
-    progressiveChainActive = false;
     progressiveNextSegmentIndex = 0;
     progressiveTailInflight = false;
     progressiveTailScheduled = false;
@@ -1761,7 +1920,7 @@ window.__ENTRADE_AUTOMATION_SIM__ = {
         allStatusChanges = data.status_changes || [];
         allTradeMarkers = data.trade_markers || [];
         allStrategyMarkers = data.strategy_markers || [];
-        allBracketLive = data.bracket_live || null;
+        applyBracketLiveFromResponse(data.bracket_live);
 
         if (!candles.length) {
           renderCompactQuote(lastData, candles);
@@ -1800,11 +1959,21 @@ window.__ENTRADE_AUTOMATION_SIM__ = {
   }
 
   refreshBtn.addEventListener('click', function() {
+    try {
+      if (typeof window.__ENTRADE_REPLAY_INVALIDATE_DAY_MASTER === 'function') {
+        window.__ENTRADE_REPLAY_INVALIDATE_DAY_MASTER();
+      }
+    } catch (eRf) {}
     followLiveRightEdge = true;
     load(true);
     restartCandlesPolling();
   });
   intervalSelect.addEventListener('change', function() {
+    try {
+      if (typeof window.__ENTRADE_REPLAY_INVALIDATE_DAY_MASTER === 'function') {
+        window.__ENTRADE_REPLAY_INVALIDATE_DAY_MASTER();
+      }
+    } catch (eIv) {}
     candlesPollPaused = false;
     load(true);
     restartCandlesPolling();
@@ -1812,6 +1981,11 @@ window.__ENTRADE_AUTOMATION_SIM__ = {
   if (tickerInput) {
     tickerInput.addEventListener('change', function() {
       fetchSessionDates(function() {
+        try {
+          if (typeof window.__ENTRADE_REPLAY_INVALIDATE_DAY_MASTER === 'function') {
+            window.__ENTRADE_REPLAY_INVALIDATE_DAY_MASTER();
+          }
+        } catch (eIt) {}
         followLiveRightEdge = true;
         candlesPollPaused = false;
         load(true);
@@ -1821,6 +1995,11 @@ window.__ENTRADE_AUTOMATION_SIM__ = {
   }
   if (sessionDateSelect) {
     sessionDateSelect.addEventListener('change', function() {
+      try {
+        if (typeof window.__ENTRADE_REPLAY_INVALIDATE_DAY_MASTER === 'function') {
+          window.__ENTRADE_REPLAY_INVALIDATE_DAY_MASTER();
+        }
+      } catch (eIs) {}
       followLiveRightEdge = true;
       candlesPollPaused = false;
       load(true);
